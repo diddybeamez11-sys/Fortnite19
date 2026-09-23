@@ -43,44 +43,69 @@ jobs:
       - name: Download Minecraft APK from release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
-          ASSET: ${{ inputs.asset_name }}
-          RELEASE_REPO: ${{ inputs.release_repo }}
         run: |
           set -euo pipefail
 
+          TAG='${{ inputs.release_tag }}'
+          ASSET='${{ inputs.asset_name }}'
+          RELEASE_REPO='${{ inputs.release_repo }}'
+
+          TAG="$(printf '%s' "\( TAG" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]* \)//')"
+          ASSET="$(printf '%s' "\( ASSET" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]* \)//')"
+          RELEASE_REPO="$(printf '%s' "\( RELEASE_REPO" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]* \)//')"
+
+          if [[ -z "$TAG" ]]; then TAG="mc-base"; fi
+          if [[ -z "$ASSET" ]]; then ASSET="minecraft-1-21-111.apk"; fi
+
+          echo "Resolved TAG=[${TAG}]"
+          echo "Resolved ASSET=[${ASSET}]"
+          echo "Resolved RELEASE_REPO=[${RELEASE_REPO}]"
+
           if [[ -n "${RELEASE_REPO}" ]]; then
             echo "Using release repo: ${RELEASE_REPO}"
+            VIEW=(gh release view --repo "\( {RELEASE_REPO}" " \){TAG}")
+            DL=(gh release download --repo "\( {RELEASE_REPO}" " \){TAG}")
           else
             echo "Using current repo: ${GITHUB_REPOSITORY}"
+            VIEW=(gh release view "${TAG}")
+            DL=(gh release download "${TAG}")
           fi
 
           echo "Looking up release tag: ${TAG}"
+          "${VIEW[@]}" --json tagName,name,isDraft,isPrerelease,assets
 
-          # Never expand an empty array into gh — it becomes a 2nd positional arg
-          # and triggers: accepts at most 1 arg(s), received 2
-          if [[ -n "${RELEASE_REPO}" ]]; then
-            gh release view --repo "\( {RELEASE_REPO}" " \){TAG}" --json tagName,name,isDraft,isPrerelease,assets
-            mapfile -t ASSETS < <(gh release view --repo "\( {RELEASE_REPO}" " \){TAG}" --json assets --jq '.assets[].name')
-          else
-            gh release view "${TAG}" --json tagName,name,isDraft,isPrerelease,assets
-            mapfile -t ASSETS < <(gh release view "${TAG}" --json assets --jq '.assets[].name')
-          fi
-
-          echo "Assets on release:"
+          mapfile -t ASSETS < <("${VIEW[@]}" --json assets --jq -r '.assets[].name' | tr -d '\r')
+          echo "Assets on release (${#ASSETS[@]}):"
           if [[ ${#ASSETS[@]} -eq 0 ]]; then
             echo "::error::Release '${TAG}' has zero assets. Upload the APK to this release first."
             exit 1
           fi
-          printf '  - %s\n' "${ASSETS[@]}"
+          printf '  - [%s]\n' "${ASSETS[@]}"
 
           MATCH=""
           for name in "${ASSETS[@]}"; do
+            name="$(printf '%s' "\( name" | sed 's/^[[:space:]]*//;s/[[:space:]]* \)//')"
+            echo "Comparing asset [\( {name}] to wanted [ \){ASSET}]"
             if [[ "\( {name}" == " \){ASSET}" ]]; then
               MATCH="${name}"
               break
             fi
           done
+
+          if [[ -z "${MATCH}" ]]; then
+            APK_CANDIDATES=()
+            for name in "${ASSETS[@]}"; do
+              name="$(printf '%s' "\( name" | sed 's/^[[:space:]]*//;s/[[:space:]]* \)//')"
+              case "${name}" in
+                *.apk|*.APK) APK_CANDIDATES+=("${name}") ;;
+              esac
+            done
+            if [[ ${#APK_CANDIDATES[@]} -eq 1 ]]; then
+              MATCH="${APK_CANDIDATES[0]}"
+              echo "Exact name miss; falling back to sole APK asset: ${MATCH}"
+            fi
+          fi
+
           if [[ -z "${MATCH}" ]]; then
             echo "::error::No asset named exactly '\( {ASSET}' on release ' \){TAG}'."
             echo "Update the workflow input asset_name to one of the names listed above."
@@ -88,11 +113,7 @@ jobs:
           fi
 
           mkdir -p "${RUNNER_TEMP}"
-          if [[ -n "${RELEASE_REPO}" ]]; then
-            gh release download --repo "\( {RELEASE_REPO}" " \){TAG}" --dir "\( {RUNNER_TEMP}" --clobber " \){MATCH}"
-          else
-            gh release download "\( {TAG}" --dir " \){RUNNER_TEMP}" --clobber "${MATCH}"
-          fi
+          "\( {DL[@]}" --dir " \){RUNNER_TEMP}" --clobber "${MATCH}"
 
           APK_PATH="\( {RUNNER_TEMP}/ \){MATCH}"
           if [[ ! -f "${APK_PATH}" ]]; then
