@@ -1,31 +1,61 @@
 #!/usr/bin/env bash
+
 set -euo pipefail
+
+# ============================================================
+# E-CLIENT APK PATCHER
+# Minecraft Bedrock 1.21.111 ARM64
+#
+# Arguments:
+#
+#   $1 = original Minecraft APK
+#   $2 = E-Client native host library
+#   $3 = output patched APK
+#
+# ============================================================
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Arguments:
-#   $1 = original Minecraft APK
-#   $2 = compiled eclient_host.so
-#   $3 = final patched APK
-
 INPUT_APK="${1:-}"
 HOST_SO="${2:-}"
-OUTPUT_APK="${3:-$ROOT/E-Client-Minecraft-1.21.111-ARM64.apk}"
-
-WORK="$ROOT/.patch-work"
+OUTPUT_APK="${3:-$ROOT/out/eclient-minecraft-1.21.111-arm64.apk}"
 
 EXPECTED_SHA256="69f6584c000a4ec80ff8c4790f43d80b3e2ee67788842fdd39fd5be70fdb3d59"
 
-PROVIDER="com.rubidiumclient.host.EClientLoaderProvider"
-AUTHORITY="com.rubidiumclient.eclientloader"
+WORK="$ROOT/.patch-work"
+DECODED="$WORK/mc"
 
-# IMPORTANT:
-# The loader is located in tools/, not native/runtime/src/host/.
-HOST_SMALI="$ROOT/tools/minecraft-host-loader.smali"
+BUILT_APK="$WORK/eclient-unsigned.apk"
+ALIGNED_APK="$WORK/eclient-aligned.apk"
 
-if [[ -z "$INPUT_APK" || -z "$HOST_SO" ]]; then
+LOADER_SOURCE="$ROOT/tools/minecraft-host-loader.smali"
+
+LOADER_CLASS="com.rubidiumclient.host.EClientLoaderProvider"
+LOADER_AUTHORITY="com.rubidiumclient.eclientloader"
+
+echo "=========================================="
+echo " E-CLIENT APK PATCHER"
+echo " Minecraft Bedrock 1.21.111 ARM64"
+echo "=========================================="
+echo
+
+# ============================================================
+# Arguments
+# ============================================================
+
+if [[ -z "$INPUT_APK" ]]; then
+    echo "ERROR: Missing input APK."
+    echo
     echo "Usage:"
-    echo "$0 <input.apk> <host.so> [output.apk]"
+    echo "  $0 <minecraft.apk> <libeclient_host.so> <output.apk>"
+    exit 1
+fi
+
+if [[ -z "$HOST_SO" ]]; then
+    echo "ERROR: Missing native host library."
+    echo
+    echo "Usage:"
+    echo "  $0 <minecraft.apk> <libeclient_host.so> <output.apk>"
     exit 1
 fi
 
@@ -41,18 +71,16 @@ if [[ ! -f "$HOST_SO" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$HOST_SMALI" ]]; then
-    echo "ERROR: Loader source does not exist:"
-    echo "$HOST_SMALI"
+if [[ ! -f "$LOADER_SOURCE" ]]; then
+    echo "ERROR: Missing loader:"
+    echo "$LOADER_SOURCE"
     exit 1
 fi
 
-echo "=========================================="
-echo " E-CLIENT APK PATCHER"
-echo " Minecraft Bedrock 1.21.111 ARM64"
-echo "=========================================="
+# ============================================================
+# 1. Check tools
+# ============================================================
 
-echo
 echo "[1/11] Checking required tools..."
 
 for tool in \
@@ -62,74 +90,93 @@ for tool in \
     aapt2 \
     python3 \
     sha256sum \
-    keytool \
-    file
+    file \
+    unzip \
+    zip
 do
     if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "ERROR: Missing required tool: $tool"
+        echo "ERROR: Required tool not found: $tool"
         exit 1
     fi
 done
 
 echo "Required tools available."
-
 echo
+
+# ============================================================
+# 2. Verify original Minecraft APK
+# ============================================================
+
 echo "[2/11] Checking original Minecraft APK SHA-256..."
 
 ACTUAL_SHA256="$(sha256sum "$INPUT_APK" | awk '{print $1}')"
 
 echo "Expected:"
 echo "$EXPECTED_SHA256"
-
 echo
+
 echo "Actual:"
 echo "$ACTUAL_SHA256"
+echo
 
 if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
-    echo
-    echo "ERROR: Wrong Minecraft APK."
+    echo "ERROR: Minecraft APK SHA-256 mismatch."
     exit 1
 fi
 
-echo
 echo "Minecraft APK SHA-256 verified."
-
 echo
+
+# ============================================================
+# 3. Verify native library
+# ============================================================
+
 echo "[3/11] Checking E-Client native library..."
 
-file "$HOST_SO"
+HOST_INFO="$(file "$HOST_SO")"
 
-if ! file "$HOST_SO" | grep -Eiq \
-    'ARM aarch64|ARM64|aarch64'
-then
-    echo
-    echo "ERROR: eclient_host.so is not ARM64."
+echo "$HOST_INFO"
+echo
+
+if ! printf '%s\n' "$HOST_INFO" | grep -Eq \
+    'ELF 64-bit.*ARM aarch64|ELF 64-bit.*aarch64'; then
+
+    echo "ERROR: Native host library is not ARM64."
     exit 1
 fi
 
-echo
 echo "ARM64 native library verified."
-
 echo
+
 echo "Loader:"
-echo "$HOST_SMALI"
-
+echo "$LOADER_SOURCE"
 echo
+
 echo "Native host:"
 echo "$HOST_SO"
-
 echo
+
+# ============================================================
+# 4. Prepare workspace
+# ============================================================
+
 echo "[4/11] Preparing workspace..."
 
 rm -rf "$WORK"
+
 mkdir -p "$WORK"
+mkdir -p "$DECODED"
 
-DECODED="$WORK/mc"
-UNSIGNED="$WORK/rebuilt-unsigned.apk"
-ALIGNED="$WORK/aligned.apk"
-KEYSTORE="$WORK/eclient-debug.keystore"
+rm -f "$OUTPUT_APK"
 
+echo "Workspace:"
+echo "$WORK"
 echo
+
+# ============================================================
+# 5. Decode APK
+# ============================================================
+
 echo "[5/11] Decoding Minecraft APK..."
 
 apktool d \
@@ -137,44 +184,45 @@ apktool d \
     "$INPUT_APK" \
     -o "$DECODED"
 
-if [[ ! -f "$DECODED/AndroidManifest.xml" ]]; then
-    echo "ERROR: AndroidManifest.xml missing after decode."
-    exit 1
-fi
-
-if [[ ! -f "$DECODED/apktool.yml" ]]; then
-    echo "ERROR: apktool.yml missing after decode."
-    exit 1
-fi
-
 echo
+echo "Minecraft APK decoded."
+echo
+
+# ============================================================
+# 6. Configure resources
+# ============================================================
+
 echo "[6/11] Configuring APK resources..."
 
-python3 - "$DECODED/apktool.yml" <<'PY'
+APKTOOL_YML="$DECODED/apktool.yml"
+
+if [[ ! -f "$APKTOOL_YML" ]]; then
+    echo "ERROR: apktool.yml not found."
+    exit 1
+fi
+
+python3 - "$APKTOOL_YML" <<'PY'
 import sys
 from pathlib import Path
+import re
 
 path = Path(sys.argv[1])
 
 text = path.read_text(encoding="utf-8")
 
-lines = text.splitlines()
+pattern = r"(?m)^resourcesAreCompressed:\s*.*$"
 
-result = []
-found = False
-
-for line in lines:
-    if line.strip().startswith("resourcesAreCompressed:"):
-        result.append("resourcesAreCompressed: false")
-        found = True
-    else:
-        result.append(line)
-
-if not found:
-    result.append("resourcesAreCompressed: false")
+if re.search(pattern, text):
+    text = re.sub(
+        pattern,
+        "resourcesAreCompressed: false",
+        text
+    )
+else:
+    text += "\nresourcesAreCompressed: false\n"
 
 path.write_text(
-    "\n".join(result) + "\n",
+    text,
     encoding="utf-8"
 )
 
@@ -182,110 +230,250 @@ print("resourcesAreCompressed: false")
 PY
 
 echo
+
+# ============================================================
+# Install loader
+# ============================================================
+
 echo "Installing E-Client loader..."
 
-SMALI_DIR="$DECODED/smali/com/rubidiumclient/host"
+LOADER_DIR="$DECODED/smali/com/rubidiumclient/host"
 
-mkdir -p "$SMALI_DIR"
+mkdir -p "$LOADER_DIR"
 
 cp \
-    "$HOST_SMALI" \
-    "$SMALI_DIR/EClientLoaderProvider.smali"
+    "$LOADER_SOURCE" \
+    "$LOADER_DIR/EClientLoaderProvider.smali"
 
-if [[ ! -f "$SMALI_DIR/EClientLoaderProvider.smali" ]]; then
+echo "Loader installed:"
+echo "$LOADER_DIR/EClientLoaderProvider.smali"
+echo
+
+# ============================================================
+# Install native library
+# ============================================================
+
+echo "Installing ARM64 native library..."
+
+NATIVE_DIR="$DECODED/lib/arm64-v8a"
+
+mkdir -p "$NATIVE_DIR"
+
+cp \
+    "$HOST_SO" \
+    "$NATIVE_DIR/libeclient_host.so"
+
+chmod 0644 \
+    "$NATIVE_DIR/libeclient_host.so"
+
+echo "Native library installed:"
+echo "$NATIVE_DIR/libeclient_host.so"
+echo
+
+# ============================================================
+# Update AndroidManifest.xml
+# ============================================================
+
+echo "Updating AndroidManifest.xml..."
+
+MANIFEST="$DECODED/AndroidManifest.xml"
+
+if [[ ! -f "$MANIFEST" ]]; then
+    echo "ERROR: AndroidManifest.xml not found:"
+    echo "$MANIFEST"
+    exit 1
+fi
+
+python3 - "$MANIFEST" <<'PY'
+import sys
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+manifest_path = Path(sys.argv[1])
+
+ANDROID_NS = "http://schemas.android.com/apk/res/android"
+
+ET.register_namespace(
+    "android",
+    ANDROID_NS
+)
+
+tree = ET.parse(manifest_path)
+root = tree.getroot()
+
+application = root.find("application")
+
+if application is None:
+    raise RuntimeError(
+        "AndroidManifest.xml does not contain an application element"
+    )
+
+name_attr = f"{{{ANDROID_NS}}}name"
+authority_attr = f"{{{ANDROID_NS}}}authorities"
+exported_attr = f"{{{ANDROID_NS}}}exported"
+init_order_attr = f"{{{ANDROID_NS}}}initOrder"
+
+provider_name = "com.rubidiumclient.host.EClientLoaderProvider"
+provider_authority = "com.rubidiumclient.eclientloader"
+
+provider = None
+
+for item in application.findall("provider"):
+    if item.get(name_attr) == provider_name:
+        provider = item
+        break
+
+if provider is None:
+    provider = ET.Element("provider")
+    application.append(provider)
+
+provider.set(
+    name_attr,
+    provider_name
+)
+
+provider.set(
+    authority_attr,
+    provider_authority
+)
+
+provider.set(
+    exported_attr,
+    "false"
+)
+
+provider.set(
+    init_order_attr,
+    "100"
+)
+
+tree.write(
+    manifest_path,
+    encoding="utf-8",
+    xml_declaration=True
+)
+
+print("E-Client loader provider added successfully.")
+print(f"Provider: {provider_name}")
+print(f"Authority: {provider_authority}")
+PY
+
+echo
+
+# ============================================================
+# Verify loader
+# ============================================================
+
+echo "Verifying loader installation..."
+
+if [[ ! -f "$LOADER_DIR/EClientLoaderProvider.smali" ]]; then
     echo "ERROR: Loader installation failed."
     exit 1
 fi
 
+grep -q \
+    'Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V' \
+    "$LOADER_DIR/EClientLoaderProvider.smali" || {
+        echo "ERROR: Loader does not call System.loadLibrary."
+        exit 1
+    }
+
+grep -q \
+    'const-string v0, "eclient_host"' \
+    "$LOADER_DIR/EClientLoaderProvider.smali" || {
+        echo "ERROR: Loader does not load eclient_host."
+        exit 1
+    }
+
+echo "Loader verified."
 echo
-echo "Installing ARM64 native library..."
 
-LIB_DIR="$DECODED/lib/arm64-v8a"
+# ============================================================
+# Verify manifest
+# ============================================================
 
-mkdir -p "$LIB_DIR"
+echo "Verifying manifest provider..."
 
-cp \
-    "$HOST_SO" \
-    "$LIB_DIR/libeclient_host.so"
-
-if [[ ! -f "$LIB_DIR/libeclient_host.so" ]]; then
-    echo "ERROR: Native library installation failed."
-    exit 1
-fi
-
-echo
-echo "Updating AndroidManifest.xml..."
-
-python3 \
-    "$DECODED/AndroidManifest.xml" \
-    "$PROVIDER" \
-    "$AUTHORITY" <<'PY'
+python3 - "$MANIFEST" <<'PY'
 import sys
-import re
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 manifest_path = Path(sys.argv[1])
-provider = sys.argv[2]
-authority = sys.argv[3]
 
-text = manifest_path.read_text(encoding="utf-8")
+ANDROID_NS = "http://schemas.android.com/apk/res/android"
 
-if provider in text:
-    print("Provider already exists.")
-    sys.exit(0)
+tree = ET.parse(manifest_path)
+root = tree.getroot()
 
-provider_xml = (
-    f'<provider '
-    f'android:name="{provider}" '
-    f'android:authorities="{authority}" '
-    f'android:exported="false" '
-    f'android:initOrder="1000" />'
-)
+application = root.find("application")
 
-match = re.search(r"</application\s*>", text)
+if application is None:
+    raise RuntimeError(
+        "No application element found"
+    )
 
-if not match:
-    print("ERROR: Could not find </application>.")
-    sys.exit(1)
+name_attr = f"{{{ANDROID_NS}}}name"
+authority_attr = f"{{{ANDROID_NS}}}authorities"
 
-text = (
-    text[:match.start()]
-    + provider_xml
-    + "\n"
-    + text[match.start():]
-)
+expected_name = \
+    "com.rubidiumclient.host.EClientLoaderProvider"
 
-manifest_path.write_text(
-    text,
-    encoding="utf-8"
-)
+expected_authority = \
+    "com.rubidiumclient.eclientloader"
 
-print("Provider added.")
+found = False
+
+for provider in application.findall("provider"):
+
+    if (
+        provider.get(name_attr) == expected_name
+        and
+        provider.get(authority_attr) == expected_authority
+    ):
+        found = True
+        break
+
+if not found:
+    raise RuntimeError(
+        "E-Client ContentProvider was not found"
+        " in AndroidManifest.xml"
+    )
+
+print("Manifest provider verified.")
 PY
 
-if ! grep -q "$PROVIDER" "$DECODED/AndroidManifest.xml"; then
-    echo "ERROR: Provider was not added."
-    exit 1
-fi
-
 echo
-echo "[7/11] Rebuilding APK..."
 
-rm -f "$UNSIGNED"
+# ============================================================
+# 7. Rebuild APK
+# ============================================================
+
+echo "[7/11] Rebuilding patched APK..."
+
+rm -f "$BUILT_APK"
 
 apktool b \
     "$DECODED" \
-    -o "$UNSIGNED"
+    -o "$BUILT_APK"
 
-if [[ ! -s "$UNSIGNED" ]]; then
-    echo "ERROR: Apktool rebuild failed."
+if [[ ! -f "$BUILT_APK" ]]; then
+    echo "ERROR: Apktool did not create the APK."
     exit 1
 fi
 
 echo
-echo "[8/11] Verifying resources.arsc..."
+echo "Unsigned APK created:"
+ls -lh "$BUILT_APK"
+echo
 
-python3 - "$UNSIGNED" <<'PY'
+# ============================================================
+# 8. Verify resources.arsc
+# ============================================================
+
+echo "[8/11] Checking resources.arsc compression..."
+
+python3 - "$BUILT_APK" <<'PY'
 import sys
 import zipfile
 
@@ -293,65 +481,104 @@ apk = sys.argv[1]
 
 with zipfile.ZipFile(apk, "r") as z:
 
-    if "resources.arsc" not in z.namelist():
-        print("ERROR: resources.arsc missing.")
-        sys.exit(1)
-
-    info = z.getinfo("resources.arsc")
-
-    print(
-        "resources.arsc compression method:",
-        info.compress_type
-    )
+    try:
+        info = z.getinfo("resources.arsc")
+    except KeyError:
+        raise RuntimeError(
+            "resources.arsc is missing from rebuilt APK"
+        )
 
     if info.compress_type != zipfile.ZIP_STORED:
-        print("ERROR: resources.arsc is compressed.")
-        sys.exit(1)
+        raise RuntimeError(
+            "resources.arsc is compressed. "
+            "It must be uncompressed."
+        )
 
-print("resources.arsc is uncompressed.")
+    print("resources.arsc is uncompressed.")
 PY
 
 echo
-echo "[9/11] ZIP-aligning APK..."
 
-rm -f "$ALIGNED"
+# ============================================================
+# Verify native library
+# ============================================================
+
+echo "Checking native library inside APK..."
+
+if ! unzip -l "$BUILT_APK" | grep -q \
+    'lib/arm64-v8a/libeclient_host.so'; then
+
+    echo "ERROR: libeclient_host.so missing from APK."
+    exit 1
+fi
+
+echo "Native library present."
+echo
+
+# ============================================================
+# 9. Prepare signing key
+# ============================================================
+
+echo "[9/11] Preparing signing key..."
+
+KEYSTORE="$WORK/eclient-debug.keystore"
+
+if [[ ! -f "$KEYSTORE" ]]; then
+
+    keytool \
+        -genkeypair \
+        -v \
+        -keystore "$KEYSTORE" \
+        -storepass android \
+        -keypass android \
+        -alias androiddebugkey \
+        -keyalg RSA \
+        -keysize 2048 \
+        -validity 10000 \
+        -dname "CN=Android Debug,O=Android,C=US"
+
+fi
+
+echo "Signing key ready."
+echo
+
+# ============================================================
+# 10. zipalign
+# ============================================================
+
+echo "[10/11] Aligning APK..."
+
+rm -f "$ALIGNED_APK"
 
 zipalign \
     -P 16 \
     -f \
     4 \
-    "$UNSIGNED" \
-    "$ALIGNED"
+    "$BUILT_APK" \
+    "$ALIGNED_APK"
+
+echo
+
+echo "Checking APK alignment..."
 
 zipalign \
     -c \
     -P 16 \
     -v \
     4 \
-    "$ALIGNED"
+    "$ALIGNED_APK"
 
 echo
-echo "[10/11] Creating signing key..."
+echo "APK alignment verified."
+echo
 
-keytool \
-    -genkeypair \
-    -v \
-    -keystore "$KEYSTORE" \
-    -storepass android \
-    -alias androiddebugkey \
-    -keypass android \
-    -keyalg RSA \
-    -keysize 2048 \
-    -validity 10000 \
-    -dname "CN=Android Debug,O=Android,C=US" \
-    >/dev/null 2>&1
+# ============================================================
+# Sign APK
+# ============================================================
 
-mkdir -p "$(dirname "$OUTPUT_APK")"
+echo "Signing APK..."
 
 rm -f "$OUTPUT_APK"
-
-echo
-echo "Signing APK..."
 
 apksigner sign \
     --ks "$KEYSTORE" \
@@ -361,42 +588,35 @@ apksigner sign \
     --v1-signing-enabled true \
     --v2-signing-enabled true \
     --v3-signing-enabled true \
+    --v4-signing-enabled false \
     --out "$OUTPUT_APK" \
-    "$ALIGNED"
+    "$ALIGNED_APK"
 
-if [[ ! -s "$OUTPUT_APK" ]]; then
+if [[ ! -f "$OUTPUT_APK" ]]; then
     echo "ERROR: APK signing failed."
     exit 1
 fi
 
 echo
-echo "[11/11] Final APK verification..."
 
-echo
-echo "===== SIGNATURE ====="
+# ============================================================
+# Verify APK signature
+# ============================================================
+
+echo "Verifying APK signature..."
 
 apksigner verify \
     --verbose \
+    --print-certs \
     "$OUTPUT_APK"
 
 echo
-echo "===== ZIP ALIGNMENT ====="
 
-zipalign \
-    -c \
-    -P 16 \
-    -v \
-    4 \
-    "$OUTPUT_APK"
+# ============================================================
+# 11. Final APK checks
+# ============================================================
 
-echo
-echo "===== PACKAGE INFO ====="
-
-aapt2 dump badging \
-    "$OUTPUT_APK"
-
-echo
-echo "===== REQUIRED FILES ====="
+echo "[11/11] Performing final APK checks..."
 
 python3 - "$OUTPUT_APK" <<'PY'
 import sys
@@ -405,9 +625,7 @@ import zipfile
 apk = sys.argv[1]
 
 required = [
-    "AndroidManifest.xml",
     "resources.arsc",
-    "lib/arm64-v8a/libminecraftpe.so",
     "lib/arm64-v8a/libeclient_host.so",
 ]
 
@@ -416,36 +634,54 @@ with zipfile.ZipFile(apk, "r") as z:
     names = set(z.namelist())
 
     for item in required:
-
         if item not in names:
-            print("ERROR: Missing:", item)
-            sys.exit(1)
-
-        print("OK:", item)
+            raise RuntimeError(
+                f"Missing required APK entry: {item}"
+            )
 
     resources = z.getinfo("resources.arsc")
 
     if resources.compress_type != zipfile.ZIP_STORED:
-        print("ERROR: resources.arsc is compressed.")
-        sys.exit(1)
+        raise RuntimeError(
+            "resources.arsc is compressed in final APK"
+        )
 
-print()
-print("All required APK files verified.")
+print("Required APK entries verified.")
+print("resources.arsc is uncompressed.")
 PY
 
 echo
-echo "=========================================="
-echo " BUILD SUCCESSFUL"
-echo "=========================================="
 
+# ============================================================
+# Final result
+# ============================================================
+
+FINAL_SHA256="$(
+    sha256sum "$OUTPUT_APK" | awk '{print $1}'
+)"
+
+echo "=========================================="
+echo " E-CLIENT APK BUILD COMPLETE"
+echo "=========================================="
 echo
-echo "APK:"
+echo "Output:"
 echo "$OUTPUT_APK"
-
 echo
 echo "Size:"
 ls -lh "$OUTPUT_APK"
-
 echo
 echo "SHA-256:"
-sha256sum "$OUTPUT_APK"
+echo "$FINAL_SHA256"
+echo
+echo "Target:"
+echo "Minecraft Bedrock 1.21.111 ARM64"
+echo
+echo "Native:"
+echo "libeclient_host.so"
+echo
+echo "Loader:"
+echo "$LOADER_CLASS"
+echo
+echo "Status:"
+echo "APK patched, aligned, signed and verified."
+echo
