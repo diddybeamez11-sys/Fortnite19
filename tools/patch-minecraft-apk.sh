@@ -3,22 +3,29 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Arguments:
+#   $1 = original Minecraft APK
+#   $2 = compiled eclient_host.so
+#   $3 = final patched APK
+
 INPUT_APK="${1:-}"
-OUTPUT_APK="${2:-$ROOT/E-Client-Minecraft-1.21.111-ARM64.apk}"
+HOST_SO="${2:-}"
+OUTPUT_APK="${3:-$ROOT/E-Client-Minecraft-1.21.111-ARM64.apk}"
 
 WORK="$ROOT/.patch-work"
 
 EXPECTED_SHA256="69f6584c000a4ec80ff8c4790f43d80b3e2ee67788842fdd39fd5be70fdb3d59"
 
-PACKAGE="com.mojang.minecraftpe"
 PROVIDER="com.rubidiumclient.host.EClientLoaderProvider"
 AUTHORITY="com.rubidiumclient.eclientloader"
 
-HOST_SMALI="$ROOT/native/runtime/src/host/minecraft-host-loader.smali"
-HOST_SO="$ROOT/native/runtime/build/intermediates/cmake/debug/obj/arm64-v8a/libeclient_host.so"
+# IMPORTANT:
+# The loader is located in tools/, not native/runtime/src/host/.
+HOST_SMALI="$ROOT/tools/minecraft-host-loader.smali"
 
-if [[ -z "$INPUT_APK" ]]; then
-    echo "ERROR: No input APK supplied."
+if [[ -z "$INPUT_APK" || -z "$HOST_SO" ]]; then
+    echo "Usage:"
+    echo "$0 <input.apk> <host.so> [output.apk]"
     exit 1
 fi
 
@@ -28,97 +35,120 @@ if [[ ! -f "$INPUT_APK" ]]; then
     exit 1
 fi
 
+if [[ ! -f "$HOST_SO" ]]; then
+    echo "ERROR: Native host library does not exist:"
+    echo "$HOST_SO"
+    exit 1
+fi
+
+if [[ ! -f "$HOST_SMALI" ]]; then
+    echo "ERROR: Loader source does not exist:"
+    echo "$HOST_SMALI"
+    exit 1
+fi
+
 echo "=========================================="
 echo " E-CLIENT APK PATCHER"
 echo " Minecraft Bedrock 1.21.111 ARM64"
 echo "=========================================="
 
-# ------------------------------------------------------------
-# Check tools
-# ------------------------------------------------------------
+echo
+echo "[1/11] Checking required tools..."
 
-for tool in apktool zipalign apksigner aapt2 python3 zip sha256sum; do
+for tool in \
+    apktool \
+    zipalign \
+    apksigner \
+    aapt2 \
+    python3 \
+    sha256sum \
+    keytool \
+    file
+do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: Missing required tool: $tool"
         exit 1
     fi
 done
 
-# ------------------------------------------------------------
-# Verify original APK
-# ------------------------------------------------------------
+echo "Required tools available."
 
-echo "[1/11] Checking original APK SHA-256..."
+echo
+echo "[2/11] Checking original Minecraft APK SHA-256..."
 
 ACTUAL_SHA256="$(sha256sum "$INPUT_APK" | awk '{print $1}')"
 
-echo "Expected: $EXPECTED_SHA256"
-echo "Actual:   $ACTUAL_SHA256"
+echo "Expected:"
+echo "$EXPECTED_SHA256"
+
+echo
+echo "Actual:"
+echo "$ACTUAL_SHA256"
 
 if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+    echo
     echo "ERROR: Wrong Minecraft APK."
     exit 1
 fi
 
-echo "SHA-256 OK."
+echo
+echo "Minecraft APK SHA-256 verified."
 
-# ------------------------------------------------------------
-# Check E-Client files
-# ------------------------------------------------------------
-
-echo "[2/11] Checking E-Client files..."
-
-if [[ ! -f "$HOST_SMALI" ]]; then
-    echo "ERROR: Missing loader:"
-    echo "$HOST_SMALI"
-    exit 1
-fi
-
-if [[ ! -f "$HOST_SO" ]]; then
-    echo "ERROR: Missing native library:"
-    echo "$HOST_SO"
-    exit 1
-fi
+echo
+echo "[3/11] Checking E-Client native library..."
 
 file "$HOST_SO"
 
-# ------------------------------------------------------------
-# Prepare workspace
-# ------------------------------------------------------------
+if ! file "$HOST_SO" | grep -Eiq \
+    'ARM aarch64|ARM64|aarch64'
+then
+    echo
+    echo "ERROR: eclient_host.so is not ARM64."
+    exit 1
+fi
 
-echo "[3/11] Preparing workspace..."
+echo
+echo "ARM64 native library verified."
+
+echo
+echo "Loader:"
+echo "$HOST_SMALI"
+
+echo
+echo "Native host:"
+echo "$HOST_SO"
+
+echo
+echo "[4/11] Preparing workspace..."
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
 
 DECODED="$WORK/mc"
+UNSIGNED="$WORK/rebuilt-unsigned.apk"
+ALIGNED="$WORK/aligned.apk"
+KEYSTORE="$WORK/eclient-debug.keystore"
 
-# ------------------------------------------------------------
-# Decode APK
-# ------------------------------------------------------------
-
-echo "[4/11] Decoding Minecraft APK..."
+echo
+echo "[5/11] Decoding Minecraft APK..."
 
 apktool d \
     --force \
     "$INPUT_APK" \
     -o "$DECODED"
 
-if [[ ! -f "$DECODED/apktool.yml" ]]; then
-    echo "ERROR: Apktool decode failed."
-    exit 1
-fi
-
 if [[ ! -f "$DECODED/AndroidManifest.xml" ]]; then
-    echo "ERROR: AndroidManifest.xml missing."
+    echo "ERROR: AndroidManifest.xml missing after decode."
     exit 1
 fi
 
-# ------------------------------------------------------------
-# Force resources.arsc to remain uncompressed
-# ------------------------------------------------------------
+if [[ ! -f "$DECODED/apktool.yml" ]]; then
+    echo "ERROR: apktool.yml missing after decode."
+    exit 1
+fi
 
-echo "[5/11] Configuring resource compression..."
+echo
+echo "[6/11] Configuring APK resources..."
 
 python3 - "$DECODED/apktool.yml" <<'PY'
 import sys
@@ -151,11 +181,8 @@ path.write_text(
 print("resourcesAreCompressed: false")
 PY
 
-# ------------------------------------------------------------
-# Install loader
-# ------------------------------------------------------------
-
-echo "[6/11] Installing E-Client loader..."
+echo
+echo "Installing E-Client loader..."
 
 SMALI_DIR="$DECODED/smali/com/rubidiumclient/host"
 
@@ -170,10 +197,7 @@ if [[ ! -f "$SMALI_DIR/EClientLoaderProvider.smali" ]]; then
     exit 1
 fi
 
-# ------------------------------------------------------------
-# Install native library
-# ------------------------------------------------------------
-
+echo
 echo "Installing ARM64 native library..."
 
 LIB_DIR="$DECODED/lib/arm64-v8a"
@@ -189,10 +213,7 @@ if [[ ! -f "$LIB_DIR/libeclient_host.so" ]]; then
     exit 1
 fi
 
-# ------------------------------------------------------------
-# Modify manifest
-# ------------------------------------------------------------
-
+echo
 echo "Updating AndroidManifest.xml..."
 
 python3 \
@@ -247,13 +268,8 @@ if ! grep -q "$PROVIDER" "$DECODED/AndroidManifest.xml"; then
     exit 1
 fi
 
-# ------------------------------------------------------------
-# Rebuild APK
-# ------------------------------------------------------------
-
+echo
 echo "[7/11] Rebuilding APK..."
-
-UNSIGNED="$WORK/rebuilt-unsigned.apk"
 
 rm -f "$UNSIGNED"
 
@@ -261,16 +277,13 @@ apktool b \
     "$DECODED" \
     -o "$UNSIGNED"
 
-if [[ ! -f "$UNSIGNED" ]]; then
+if [[ ! -s "$UNSIGNED" ]]; then
     echo "ERROR: Apktool rebuild failed."
     exit 1
 fi
 
-# ------------------------------------------------------------
-# Verify resources.arsc
-# ------------------------------------------------------------
-
-echo "[8/11] Checking resources.arsc..."
+echo
+echo "[8/11] Verifying resources.arsc..."
 
 python3 - "$UNSIGNED" <<'PY'
 import sys
@@ -279,13 +292,17 @@ import zipfile
 apk = sys.argv[1]
 
 with zipfile.ZipFile(apk, "r") as z:
+
     if "resources.arsc" not in z.namelist():
         print("ERROR: resources.arsc missing.")
         sys.exit(1)
 
     info = z.getinfo("resources.arsc")
 
-    print("Compression method:", info.compress_type)
+    print(
+        "resources.arsc compression method:",
+        info.compress_type
+    )
 
     if info.compress_type != zipfile.ZIP_STORED:
         print("ERROR: resources.arsc is compressed.")
@@ -294,13 +311,8 @@ with zipfile.ZipFile(apk, "r") as z:
 print("resources.arsc is uncompressed.")
 PY
 
-# ------------------------------------------------------------
-# ZIP alignment
-# ------------------------------------------------------------
-
-echo "[9/11] Aligning APK..."
-
-ALIGNED="$WORK/aligned.apk"
+echo
+echo "[9/11] ZIP-aligning APK..."
 
 rm -f "$ALIGNED"
 
@@ -318,35 +330,28 @@ zipalign \
     4 \
     "$ALIGNED"
 
-# ------------------------------------------------------------
-# Signing key
-# ------------------------------------------------------------
+echo
+echo "[10/11] Creating signing key..."
 
-KEYSTORE="$WORK/eclient-debug.keystore"
+keytool \
+    -genkeypair \
+    -v \
+    -keystore "$KEYSTORE" \
+    -storepass android \
+    -alias androiddebugkey \
+    -keypass android \
+    -keyalg RSA \
+    -keysize 2048 \
+    -validity 10000 \
+    -dname "CN=Android Debug,O=Android,C=US" \
+    >/dev/null 2>&1
 
-if [[ ! -f "$KEYSTORE" ]]; then
-    echo "Creating signing key..."
-
-    keytool \
-        -genkeypair \
-        -v \
-        -keystore "$KEYSTORE" \
-        -storepass android \
-        -alias androiddebugkey \
-        -keypass android \
-        -keyalg RSA \
-        -keysize 2048 \
-        -validity 10000 \
-        -dname "CN=Android Debug,O=Android,C=US"
-fi
-
-# ------------------------------------------------------------
-# Sign APK
-# ------------------------------------------------------------
-
-echo "[10/11] Signing APK..."
+mkdir -p "$(dirname "$OUTPUT_APK")"
 
 rm -f "$OUTPUT_APK"
+
+echo
+echo "Signing APK..."
 
 apksigner sign \
     --ks "$KEYSTORE" \
@@ -359,26 +364,23 @@ apksigner sign \
     --out "$OUTPUT_APK" \
     "$ALIGNED"
 
-if [[ ! -f "$OUTPUT_APK" ]]; then
+if [[ ! -s "$OUTPUT_APK" ]]; then
     echo "ERROR: APK signing failed."
     exit 1
 fi
 
-# ------------------------------------------------------------
-# Final verification
-# ------------------------------------------------------------
-
+echo
 echo "[11/11] Final APK verification..."
 
 echo
-echo "===== APK SIGNATURE ====="
+echo "===== SIGNATURE ====="
 
 apksigner verify \
     --verbose \
     "$OUTPUT_APK"
 
 echo
-echo "===== APK ALIGNMENT ====="
+echo "===== ZIP ALIGNMENT ====="
 
 zipalign \
     -c \
@@ -388,9 +390,10 @@ zipalign \
     "$OUTPUT_APK"
 
 echo
-echo "===== APK PACKAGE INFO ====="
+echo "===== PACKAGE INFO ====="
 
-aapt2 dump badging "$OUTPUT_APK"
+aapt2 dump badging \
+    "$OUTPUT_APK"
 
 echo
 echo "===== REQUIRED FILES ====="
@@ -404,13 +407,16 @@ apk = sys.argv[1]
 required = [
     "AndroidManifest.xml",
     "resources.arsc",
+    "lib/arm64-v8a/libminecraftpe.so",
     "lib/arm64-v8a/libeclient_host.so",
 ]
 
 with zipfile.ZipFile(apk, "r") as z:
+
     names = set(z.namelist())
 
     for item in required:
+
         if item not in names:
             print("ERROR: Missing:", item)
             sys.exit(1)
@@ -423,18 +429,23 @@ with zipfile.ZipFile(apk, "r") as z:
         print("ERROR: resources.arsc is compressed.")
         sys.exit(1)
 
-print("All required files verified.")
+print()
+print("All required APK files verified.")
 PY
 
 echo
 echo "=========================================="
 echo " BUILD SUCCESSFUL"
 echo "=========================================="
+
 echo
 echo "APK:"
 echo "$OUTPUT_APK"
+
 echo
+echo "Size:"
 ls -lh "$OUTPUT_APK"
+
 echo
 echo "SHA-256:"
 sha256sum "$OUTPUT_APK"
