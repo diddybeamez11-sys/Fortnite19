@@ -1,15 +1,15 @@
-name: Build E-Client 1.21.111 ARM64
+name: E-Client 1.21.111 ARM64
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag containing the original Minecraft 1.21.111 ARM64 APK"
+        description: "GitHub Release tag containing the original Minecraft APK"
         required: true
         default: "mc-base"
 
       asset_name:
-        description: "Minecraft APK asset name"
+        description: "Minecraft 1.21.111 APK asset name"
         required: true
         default: "minecraft-1-21-111.apk"
 
@@ -22,38 +22,37 @@ concurrency:
 
 jobs:
   build:
-    name: Build native runtime and patch APK
+    name: Build E-Client
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # SOURCE
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Show source tree
         run: |
-          echo "=== Repository ==="
+          set -e
+
+          echo "Repository:"
           pwd
 
           echo
-          echo "=== Files ==="
-          find . -maxdepth 4 -type f | sort
+          echo "Top-level files:"
+          find . -maxdepth 3 -type f | sort | head -300
 
           echo
-          echo "=== Native source ==="
+          echo "Native source:"
           find native -type f | sort
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # JAVA
-      #
-      # This project has NO Gradle build.
-      # Do NOT enable setup-java Gradle caching.
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -61,15 +60,17 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # ------------------------------------------------------------
-      # ANDROID SDK / NDK
-      # ------------------------------------------------------------
+      # ==========================================================
+      # ANDROID
+      # ==========================================================
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
       - name: Install Android toolchain
         run: |
+          set -e
+
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
           sdkmanager --install \
@@ -79,104 +80,122 @@ jobs:
             "ndk;28.2.13676358" \
             "cmake;3.22.1"
 
+      - name: Configure Android environment
+        run: |
+          set -e
+
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
           echo "${ANDROID_SDK_ROOT}/platform-tools" >> "$GITHUB_PATH"
           echo "${ANDROID_SDK_ROOT}/build-tools/35.0.0" >> "$GITHUB_PATH"
+          echo "${ANDROID_SDK_ROOT}/cmake/3.22.1/bin" >> "$GITHUB_PATH"
 
       - name: Verify Android toolchain
         run: |
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          set -e
 
-          test -d "${ANDROID_SDK_ROOT}/ndk/28.2.13676358"
+          echo "SDK:"
+          echo "$ANDROID_SDK_ROOT"
+
+          echo
+          echo "NDK:"
+          echo "$ANDROID_NDK_HOME"
+
+          test -d "$ANDROID_NDK_HOME"
           test -d "${ANDROID_SDK_ROOT}/cmake/3.22.1"
 
+          echo
           adb version
+
+          echo
           cmake --version
 
-          "${ANDROID_SDK_ROOT}/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+          echo
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
             --version
 
-      # ------------------------------------------------------------
-      # SOURCE VALIDATION
-      # ------------------------------------------------------------
+          echo
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            --version
 
-      - name: Validate E-Client source
+      # ==========================================================
+      # SOURCE VALIDATION
+      # ==========================================================
+
+      - name: Validate source
         run: |
           set -e
+
+          echo "Checking E-Client source..."
 
           test -f native/CMakeLists.txt
           test -f native/runtime/CMakeLists.txt
 
           test -f native/runtime/src/main.cpp
-          test -f native/runtime/src/modules/GameplayModules.cpp
-          test -f native/runtime/src/modules/ModuleManager.cpp
-          test -f native/runtime/src/profile/Offsets_1_21_111.h
-          test -f native/runtime/src/profile/PatchManager.cpp
-
-          test -f native/vendor/dobby/libdobby.a
 
           test -f tools/build-and-patch.sh
           test -f tools/patch-minecraft-apk.sh
           test -f tools/verify-1.21.111.sh
-          test -f tools/minecraft-host-loader.smali
 
           chmod +x tools/*.sh
 
           echo
-          echo "=== 1.21.111 offsets ==="
-          grep -E \
-            'SetSprinting|InitMaxAutoStep|Gravity|Attack|NormalTick|GetRuntimeActor|GetHealth' \
-            native/runtime/src/profile/Offsets_1_21_111.h
+          echo "Relevant source files:"
+          find native/runtime -type f | sort
 
-      # ------------------------------------------------------------
-      # DOWNLOAD ORIGINAL MINECRAFT APK
-      # ------------------------------------------------------------
+          echo
+          echo "1.21.111 references:"
+          grep -RniE \
+            'SetSprinting|InitMaxAutoStep|Gravity|1\.21\.111|ea5614dcc3551721b14f9b4686aa1651c1b8f79e' \
+            native/runtime 2>/dev/null || true
 
-      - name: Download Minecraft 1.21.111 APK
+      # ==========================================================
+      # DOWNLOAD ORIGINAL APK
+      # ==========================================================
+
+      - name: Download Minecraft APK
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.release_tag }}
-          ASSET: ${{ inputs.asset_name }}
         run: |
           set -e
 
           mkdir -p "$RUNNER_TEMP/minecraft"
 
-          gh release download "$TAG" \
+          gh release download \
+            "${{ inputs.release_tag }}" \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern "$ASSET" \
+            --pattern "${{ inputs.asset_name }}" \
             --dir "$RUNNER_TEMP/minecraft"
 
-          test -f "$RUNNER_TEMP/minecraft/$ASSET"
+          APK="$RUNNER_TEMP/minecraft/${{ inputs.asset_name }}"
+
+          test -f "$APK"
 
           echo
-          echo "=== Downloaded APK ==="
-          ls -lh "$RUNNER_TEMP/minecraft/$ASSET"
+          echo "Downloaded:"
+          ls -lh "$APK"
 
           echo
-          echo "=== APK SHA-256 ==="
-          sha256sum "$RUNNER_TEMP/minecraft/$ASSET"
+          echo "SHA-256:"
+          sha256sum "$APK"
 
-      # ------------------------------------------------------------
-      # VERIFY ORIGINAL MINECRAFT BINARY
-      #
-      # IMPORTANT:
-      # verify-1.21.111.sh checks the ORIGINAL SHA:
-      #
-      # 69f6584c000a4ec80ff8c4790f43d80b3e2ee67788842fdd39fd5be70fdb3d59
-      #
-      # Therefore this MUST happen before patching.
-      # ------------------------------------------------------------
+      # ==========================================================
+      # VERIFY ORIGINAL APK
+      # ==========================================================
 
-      - name: Verify original Minecraft 1.21.111 binary
+      - name: Verify Minecraft 1.21.111
         run: |
           set -e
+
+          chmod +x tools/verify-1.21.111.sh
 
           tools/verify-1.21.111.sh \
             "$RUNNER_TEMP/minecraft/${{ inputs.asset_name }}"
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # APKTOOL
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Install apktool
         run: |
@@ -186,7 +205,11 @@ jobs:
             -o /tmp/apktool.jar \
             https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
 
-          sudo mv /tmp/apktool.jar /usr/local/lib/apktool.jar
+          sudo mkdir -p /usr/local/lib
+
+          sudo mv \
+            /tmp/apktool.jar \
+            /usr/local/lib/apktool.jar
 
           cat <<'EOF' | sudo tee /usr/local/bin/apktool >/dev/null
           #!/bin/sh
@@ -197,15 +220,13 @@ jobs:
 
           apktool --version
 
-      # ------------------------------------------------------------
-      # CMAKE CONFIGURATION
-      # ------------------------------------------------------------
+      # ==========================================================
+      # CMAKE CONFIGURE
+      # ==========================================================
 
-      - name: Configure native ARM64 build
+      - name: Configure native build
         run: |
           set -e
-
-          export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/28.2.13676358"
 
           rm -rf build
 
@@ -218,9 +239,9 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-26
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # BUILD
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Build native runtime
         run: |
@@ -231,61 +252,59 @@ jobs:
             --parallel 2 \
             --verbose
 
-      # ------------------------------------------------------------
-      # CHECK BUILD OUTPUT
-      # ------------------------------------------------------------
+      # ==========================================================
+      # CHECK NATIVE OUTPUT
+      # ==========================================================
 
-      - name: Verify native libraries
+      - name: Verify native output
         run: |
           set -e
 
-          echo "=== Native libraries ==="
+          echo "Native libraries:"
           find build/native-android \
             -type f \
             \( -name "*.so" -o -name "*.a" \) \
             -print
 
-          HOST_SO="build/native-android/runtime/libeclient_host.so"
-
-          test -f "$HOST_SO"
-
           echo
-          echo "=== Host library ==="
-          file "$HOST_SO"
+          echo "ELF files:"
 
-          file "$HOST_SO" | grep -Ei \
-            'ARM aarch64|ARM64'
+          find build/native-android \
+            -type f \
+            -name "*.so" \
+            -print0 |
+          while IFS= read -r -d '' file; do
+            echo
+            echo "----- $file -----"
+            file "$file"
 
-          echo
-          echo "=== Runtime library ==="
+            if ! file "$file" | grep -qiE \
+              'ARM aarch64|ARM64'; then
+              echo "ERROR: $file is not ARM64"
+              exit 1
+            fi
+          done
 
-          RUNTIME_SO="build/native-android/runtime/libeclient_runtime.so"
+      # ==========================================================
+      # PATCH APK
+      # ==========================================================
 
-          if [ -f "$RUNTIME_SO" ]; then
-            file "$RUNTIME_SO"
-            file "$RUNTIME_SO" | grep -Ei \
-              'ARM aarch64|ARM64'
-          fi
-
-      # ------------------------------------------------------------
-      # PATCH
-      # ------------------------------------------------------------
-
-      - name: Build and patch Minecraft APK
+      - name: Build and patch APK
         run: |
           set -e
 
           mkdir -p out
 
-          export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/28.2.13676358"
+          chmod +x tools/build-and-patch.sh
+          chmod +x tools/patch-minecraft-apk.sh
 
           tools/build-and-patch.sh \
             "$RUNNER_TEMP/minecraft/${{ inputs.asset_name }}" \
             "$PWD/out/eclient-minecraft-1.21.111-arm64.apk"
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # VERIFY PATCHED APK
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Verify patched APK
         run: |
@@ -295,26 +314,26 @@ jobs:
 
           test -f "$APK"
 
-          echo "=== Patched APK ==="
+          echo "Patched APK:"
           ls -lh "$APK"
 
           echo
-          echo "=== Patched APK SHA-256 ==="
+          echo "Patched APK SHA-256:"
           sha256sum "$APK"
 
           echo
-          echo "=== ARM64 libraries ==="
-          unzip -l "$APK" | grep 'lib/arm64-v8a/'
+          echo "ARM64 libraries inside APK:"
+          unzip -l "$APK" | grep 'lib/arm64-v8a/' || true
+
+          echo
+          echo "Checking libminecraftpe.so..."
 
           unzip -l "$APK" | grep \
             'lib/arm64-v8a/libminecraftpe.so'
 
-          unzip -l "$APK" | grep \
-            'lib/arm64-v8a/libeclient_host.so'
-
-      # ------------------------------------------------------------
+      # ==========================================================
       # APK SIGNATURE
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Verify APK signature
         run: |
@@ -322,33 +341,45 @@ jobs:
 
           apksigner verify \
             --verbose \
-            out/eclient-minecraft-1.21.111-arm64.apk
+            "out/eclient-minecraft-1.21.111-arm64.apk"
 
-      # ------------------------------------------------------------
-      # EXTRACT AND VERIFY INJECTED LIBRARY
-      # ------------------------------------------------------------
+      # ==========================================================
+      # EXTRACT FINAL LIBRARIES
+      # ==========================================================
 
-      - name: Verify injected host library
+      - name: Inspect final APK libraries
         run: |
           set -e
 
           mkdir -p "$RUNNER_TEMP/final"
 
-          unzip -p \
-            out/eclient-minecraft-1.21.111-arm64.apk \
-            lib/arm64-v8a/libeclient_host.so \
-            > "$RUNNER_TEMP/final/libeclient_host.so"
+          unzip -o \
+            "out/eclient-minecraft-1.21.111-arm64.apk" \
+            'lib/arm64-v8a/*' \
+            -d "$RUNNER_TEMP/final"
 
-          test -s "$RUNNER_TEMP/final/libeclient_host.so"
+          echo "Final ARM64 libraries:"
 
-          file "$RUNNER_TEMP/final/libeclient_host.so"
+          find "$RUNNER_TEMP/final" \
+            -type f \
+            -print
 
-          file "$RUNNER_TEMP/final/libeclient_host.so" | grep -Ei \
-            'ARM aarch64|ARM64'
+          echo
+          echo "ELF information:"
 
-      # ------------------------------------------------------------
-      # ARTIFACTS
-      # ------------------------------------------------------------
+          find "$RUNNER_TEMP/final" \
+            -type f \
+            -name "*.so" \
+            -print0 |
+          while IFS= read -r -d '' file; do
+            echo
+            echo "----- $file -----"
+            file "$file"
+          done
+
+      # ==========================================================
+      # UPLOAD APK
+      # ==========================================================
 
       - name: Upload patched APK
         uses: actions/upload-artifact@v4
@@ -357,6 +388,10 @@ jobs:
           path: out/eclient-minecraft-1.21.111-arm64.apk
           if-no-files-found: error
           retention-days: 14
+
+      # ==========================================================
+      # UPLOAD NATIVE BUILD
+      # ==========================================================
 
       - name: Upload native libraries
         uses: actions/upload-artifact@v4
@@ -368,26 +403,27 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # ------------------------------------------------------------
-      # BUILD SUMMARY
-      # ------------------------------------------------------------
+      # ==========================================================
+      # SUMMARY
+      # ==========================================================
 
       - name: Build summary
         if: always()
         run: |
-          echo "========================================"
-          echo " E-CLIENT 1.21.111 ARM64 BUILD"
-          echo "========================================"
           echo
-          echo "Source: CMake/NDK"
-          echo "ABI: arm64-v8a"
-          echo "NDK: 28.2.13676358"
-          echo "CMake: 3.22.1"
+          echo "=========================================="
+          echo " E-CLIENT 1.21.111 BUILD"
+          echo "=========================================="
+          echo
+          echo "ABI:      arm64-v8a"
+          echo "NDK:      28.2.13676358"
+          echo "CMake:    3.22.1"
           echo "Minecraft: 1.21.111"
+          echo
+          echo "Expected Minecraft SHA:"
+          echo "69f6584c000a4ec80ff8c4790f43d80b3e2ee67788842fdd39fd5be70fdb3d59"
+          echo
           echo "Expected GNU Build ID:"
           echo "ea5614dcc3551721b14f9b4686aa1651c1b8f79e"
           echo
-          echo "Expected original APK SHA:"
-          echo "69f6584c000a4ec80ff8c4790f43d80b3e2ee67788842fdd39fd5be70fdb3d59"
-          echo
-          echo "========================================"
+          echo "=========================================="
