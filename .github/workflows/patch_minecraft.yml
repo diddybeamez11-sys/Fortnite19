@@ -48,20 +48,26 @@ jobs:
           RELEASE_REPO: ${{ inputs.release_repo }}
         run: |
           set -euo pipefail
-          REPO_ARGS=()
+
           if [[ -n "${RELEASE_REPO}" ]]; then
-            REPO_ARGS=(--repo "${RELEASE_REPO}")
             echo "Using release repo: ${RELEASE_REPO}"
           else
             echo "Using current repo: ${GITHUB_REPOSITORY}"
           fi
 
           echo "Looking up release tag: ${TAG}"
-          gh release view "\( {TAG}" " \){REPO_ARGS[@]}" --json tagName,name,isDraft,isPrerelease,assets \
-            --jq '{tag: .tagName, name: .name, draft: .isDraft, prerelease: .isPrerelease, assets: [.assets[].name]}'
+
+          # Never expand an empty array into gh — it becomes a 2nd positional arg
+          # and triggers: accepts at most 1 arg(s), received 2
+          if [[ -n "${RELEASE_REPO}" ]]; then
+            gh release view --repo "\( {RELEASE_REPO}" " \){TAG}" --json tagName,name,isDraft,isPrerelease,assets
+            mapfile -t ASSETS < <(gh release view --repo "\( {RELEASE_REPO}" " \){TAG}" --json assets --jq '.assets[].name')
+          else
+            gh release view "${TAG}" --json tagName,name,isDraft,isPrerelease,assets
+            mapfile -t ASSETS < <(gh release view "${TAG}" --json assets --jq '.assets[].name')
+          fi
 
           echo "Assets on release:"
-          mapfile -t ASSETS < <(gh release view "\( {TAG}" " \){REPO_ARGS[@]}" --json assets --jq '.assets[].name')
           if [[ ${#ASSETS[@]} -eq 0 ]]; then
             echo "::error::Release '${TAG}' has zero assets. Upload the APK to this release first."
             exit 1
@@ -82,9 +88,11 @@ jobs:
           fi
 
           mkdir -p "${RUNNER_TEMP}"
-          # Download by exact filename (positional). Avoid --pattern, which can
-          # report "no assets to download" even when the release is valid.
-          gh release download "\( {TAG}" " \){REPO_ARGS[@]}" --dir "\( {RUNNER_TEMP}" --clobber " \){MATCH}"
+          if [[ -n "${RELEASE_REPO}" ]]; then
+            gh release download --repo "\( {RELEASE_REPO}" " \){TAG}" --dir "\( {RUNNER_TEMP}" --clobber " \){MATCH}"
+          else
+            gh release download "\( {TAG}" --dir " \){RUNNER_TEMP}" --clobber "${MATCH}"
+          fi
 
           APK_PATH="\( {RUNNER_TEMP}/ \){MATCH}"
           if [[ ! -f "${APK_PATH}" ]]; then
