@@ -18,9 +18,11 @@ ModuleManager::ModuleManager() : modules_{
     {"NoSlowDown", "Disable item/block movement slowdown", "Movement", false, true},
     {"Noclip", "Disable solid collision response", "Movement", false, true},
     {"AntiKnockback", "Suppress motion interpolation used by knockback", "Movement", false, true},
+    {"Fly", "Flight toggle placeholder guarded behind a confirmed motion helper", "Movement", false, false},
     {"NoWaterDrown", "Disable water drowning/gravity hook", "Movement", false, true},
     {"NoLavaDrown", "Disable lava drowning/gravity hook", "Movement", false, true},
     {"SlowDownTriggers", "Disable block movement slowdown trigger", "Movement", false, true},
+    {"NoHurt", "Suppress damage application when a verified damage hook is available", "Movement", false, false},
 
     // Visual
     {"FullBright", "Force maximum brightness return value", "Visual", false, true},
@@ -35,6 +37,7 @@ ModuleManager::ModuleManager() : modules_{
 
     // Player / Misc
     {"NoEmoteCooldown", "Remove the emote cooldown gate", "Player", false, true},
+    {"NoFire", "Clear fire status when a verified fire-state helper is available", "Player", false, false},
 } {}
 
 const std::vector<ModuleState>& ModuleManager::all() const { return modules_; }
