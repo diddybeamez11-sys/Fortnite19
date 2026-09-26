@@ -18,4 +18,4 @@ The patcher validates the exact supplied APK SHA-256 before injecting the native
 ## Current verified patch modules
 NoHurtCam, FullBright, NoSlowDown, Noclip, AntiKnockback, NoBlur, NoCaveVignette, NoEmoteCooldown, NoWaterDrown, NoLavaDrown, NoCamDistortion, NoBoatRotation, NoCamSleep, PlaceCamera, SlowDownTriggers, XrayCameraThird, and AutoClickMine.
 
-Speed, Fly, KillAura, CriticalHit, and ESP are registered as runtime modules but remain gated until their 1.21.111 function calling conventions and object layouts are verified. This prevents stale offsets from turning into a crash.
+Speed, Fly, KillAura, CriticalHit, and ESP are intentionally not exposed in the menu until their 1.21.111 function calling conventions and object layouts are verified. This prevents a toggle that cannot work from appearing enabled and avoids stale offsets turning into a crash.
