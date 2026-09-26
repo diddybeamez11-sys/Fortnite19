@@ -95,9 +95,25 @@ void* findInMinecraft(const char* symbol) {
 
 bool installKeyHook() {
     if (g_keyInstalled.load()) return true;
-    void* symbol = findInMinecraft("Java_com_mojang_minecraftpe_MainActivity_nativeKeyHandler");
+
+    static const char* candidates[] = {
+        "Java_com_mojang_minecraftpe_MainActivity_nativeKeyHandler",
+        "Java_com_mojang_minecraftpe_MainActivity_nativeKeyHandler__",
+        "Java_com_mojang_minecraftpe_MainActivity_nativeKeyDown",
+        "Java_com_mojang_minecraftpe_MainActivity_nativeKeyUp"
+    };
+
+    void* symbol = nullptr;
+    for (const char* name : candidates) {
+        symbol = findInMinecraft(name);
+        if (symbol) {
+            __android_log_print(ANDROID_LOG_INFO, TAG, "Found hotkey export: %s", name);
+            break;
+        }
+    }
+
     if (!symbol) {
-        __android_log_print(ANDROID_LOG_WARN, TAG, "nativeKeyHandler export not found");
+        __android_log_print(ANDROID_LOG_WARN, TAG, "nativeKeyHandler export not found; GUI will remain available via touch-only fallback");
         return false;
     }
     if (DobbyHook(symbol, reinterpret_cast<void*>(hookedNativeKeyHandler),
