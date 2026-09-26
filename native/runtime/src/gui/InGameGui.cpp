@@ -188,7 +188,7 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
             ImGui::Separator();
             ImGui::TextDisabled("Patches fail closed if the 1.21.111 profile does not match.");
             ImGui::End();
-            if (!keepOpen) g_menuOpen.store(false);
+            if (!keepOpen && g_menuOpen.load()) toggleMenu();
         }
 
         ImGui::Render();
@@ -231,7 +231,22 @@ bool hookSwapBuffers() {
 }
 } // namespace
 
-void toggleMenu() { g_menuOpen.store(!g_menuOpen.load()); }
+void toggleMenu() {
+    bool wasOpen = g_menuOpen.load();
+    while (!g_menuOpen.compare_exchange_weak(wasOpen, !wasOpen)) {
+    }
+
+    // Do not carry a partially completed touch into the next menu session.
+    // In particular, closing the menu during a drag used to leave ImGui's
+    // primary mouse button pressed when it was opened again.
+    if (wasOpen) {
+        std::lock_guard lock(g_touchMutex);
+        g_touchQueue.clear();
+        g_lastTouchX = -1.0f;
+        g_lastTouchY = -1.0f;
+        g_lastTouchDown = false;
+    }
+}
 
 void setPhysicalWindowSize(int width, int height) {
     g_physicalWidth.store(width);
@@ -239,6 +254,7 @@ void setPhysicalWindowSize(int width, int height) {
 }
 
 void submitTouch(float x, float y, int action) {
+    if (!g_menuOpen.load() || action < 0 || action > 2) return;
     std::lock_guard lock(g_touchMutex);
     // Cap queue so a stuck input thread cannot grow without bound.
     if (g_touchQueue.size() > 64) g_touchQueue.erase(g_touchQueue.begin(), g_touchQueue.begin() + 32);

@@ -10,13 +10,9 @@ ModuleManager& ModuleManager::instance() {
 
 ModuleManager::ModuleManager() : modules_{
     // Combat
-    {"KillAura", "Nearest attackable actor within 4 blocks", "Combat", true, false},
-    {"CriticalHit", "Attack-state hook; pending verification", "Combat", true, false},
     {"AutoClickMine", "Skip the automatic mining cooldown routine", "Combat", false, true},
 
     // Movement
-    {"Speed", "Movement hook using the validated 1.21.111 movement routine", "Movement", true, false},
-    {"Fly", "Player ability hook using the validated 1.21.111 ability layout", "Movement", true, false},
     {"AlwaysSprint", "Force LocalPlayer sprint state", "Movement", true, false},
     {"Step", "Raise the player auto-step height", "Movement", true, false},
     {"NoSlowDown", "Disable item/block movement slowdown", "Movement", false, true},
@@ -36,7 +32,6 @@ ModuleManager::ModuleManager() : modules_{
     {"NoCamSleep", "Disable camera sleep fade", "Visual", false, true},
     {"PlaceCamera", "Disable camera blend placement step", "Visual", false, true},
     {"XrayCameraThird", "Disable third-person camera avoidance", "Visual", false, true},
-    {"ESP", "Actor enumeration + world-to-screen renderer; pending verification", "Visual", true, false},
 
     // Player / Misc
     {"NoEmoteCooldown", "Remove the emote cooldown gate", "Player", false, true},

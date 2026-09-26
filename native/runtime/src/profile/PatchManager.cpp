@@ -2,6 +2,7 @@
 #include "profile/Offsets_1_21_111.h"
 #include <android/log.h>
 #include <cstring>
+#include <utility>
 
 namespace eclient_runtime::profile {
 namespace {
@@ -27,12 +28,12 @@ bool PatchManager::initialize() {
         {"PlaceCamera", mc_1_21_111::PlaceCamera, {0xff,0xc3,0x00,0xd1}, RET},
         {"SlowDownTriggers", mc_1_21_111::SlowDownTriggers, {0xff,0xc3,0x00,0xd1}, RET},
         {"NoSlowDown", mc_1_21_111::NoSlowDown, {0xff,0xc3,0x00,0xd1}, RET},
-        {"WaterDrown", mc_1_21_111::WaterDrown, {0xff,0xc3,0x00,0xd1}, RET},
-        {"LavaDrown", mc_1_21_111::LavaDrown, {0xff,0xc3,0x00,0xd1}, RET},
+        {"NoWaterDrown", mc_1_21_111::WaterDrown, {0xff,0xc3,0x00,0xd1}, RET},
+        {"NoLavaDrown", mc_1_21_111::LavaDrown, {0xff,0xc3,0x00,0xd1}, RET},
         {"Noclip", mc_1_21_111::Noclip, {0xff,0xc3,0x00,0xd1}, RET},
         {"XrayCameraThird", mc_1_21_111::XrayCameraThird, {0xff,0xc3,0x00,0xd1}, RET},
-        {"NoBlur1", mc_1_21_111::NoBlur1, {0xff,0xc3,0x05,0xd1}, RET},
-        {"NoBlur2", mc_1_21_111::NoBlur2, {0xff,0x03,0x05,0xd1}, RET},
+        {"NoBlur", mc_1_21_111::NoBlur1, {0xff,0xc3,0x05,0xd1}, RET},
+        {"NoBlur", mc_1_21_111::NoBlur2, {0xff,0x03,0x05,0xd1}, RET},
         {"NoCaveVignette", mc_1_21_111::VignetteRenderer, {0xff,0x43,0x02,0xd1}, RET},
         {"AntiKnockback", mc_1_21_111::LerpMotion, {0x08,0x04,0x41,0xf9}, RET},
         {"AutoClickMine", mc_1_21_111::AutoClickMine, {0xfd,0x7b,0xbe,0xa9}, RET},
@@ -62,20 +63,46 @@ bool PatchManager::initialize() {
 
 bool PatchManager::set(const std::string& module, bool on) {
     if (!ready_ && !initialize()) return false;
+    std::vector<std::size_t> matches;
     for (std::size_t i=0; i<specs_.size(); ++i) {
-        if (module != specs_[i].module) continue;
+        if (module == specs_[i].module) matches.push_back(i);
+    }
+    if (matches.empty()) return false;
+
+    // A UI module may cover more than one patch site (for example NoBlur).
+    // Write every site, and undo the sites already changed if a later write
+    // fails.  This prevents a checked module from representing a half-applied
+    // feature.
+    std::vector<std::pair<std::size_t, bool>> changed;
+    for (const auto i : matches) {
         const auto address = minecraft_.base + specs_[i].offset;
         const auto& bytes = on ? specs_[i].enabled : specs_[i].expected;
-        if (!memory::NativeMemory::instance().write(address, bytes.data(), bytes.size())) return false;
+        if (!memory::NativeMemory::instance().write(address, bytes.data(), bytes.size())) {
+            for (const auto& [rollback, wasEnabled] : changed) {
+                const auto rollbackAddress = minecraft_.base + specs_[rollback].offset;
+                const auto& rollbackBytes = wasEnabled
+                                                ? specs_[rollback].enabled
+                                                : specs_[rollback].expected;
+                (void)memory::NativeMemory::instance().write(
+                    rollbackAddress, rollbackBytes.data(), rollbackBytes.size());
+                active_[rollback] = wasEnabled;
+            }
+            return false;
+        }
+        changed.emplace_back(i, active_[i]);
         active_[i] = on;
-        return true;
     }
-    return false;
+    return true;
 }
 
 bool PatchManager::enabled(const std::string& module) const {
-    for (std::size_t i=0; i<specs_.size(); ++i) if (module == specs_[i].module) return active_[i];
-    return false;
+    bool found = false;
+    for (std::size_t i=0; i<specs_.size(); ++i) {
+        if (module != specs_[i].module) continue;
+        found = true;
+        if (!active_[i]) return false;
+    }
+    return found;
 }
 bool PatchManager::ready() const { return ready_; }
 std::string PatchManager::status() const { return status_; }
