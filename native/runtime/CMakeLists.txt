@@ -20,6 +20,20 @@ set(ECLIENT_COMMON_SOURCES
     src/memory/NativeMemory.cpp
     src/modules/ModuleManager.cpp
     src/modules/GameplayModules.cpp
+    src/modules/combat/AutoClickMine.cpp
+    src/modules/movement/AlwaysSprint.cpp
+    src/modules/movement/Step.cpp
+    src/modules/movement/NoSlowDown.cpp
+    src/modules/movement/Noclip.cpp
+    src/modules/movement/AntiKnockback.cpp
+    src/modules/movement/Fly.cpp
+    src/modules/visual/FullBright.cpp
+    src/modules/visual/NoHurtCam.cpp
+    src/modules/visual/NoBlur.cpp
+    src/modules/visual/NoCaveVignette.cpp
+    src/modules/player/NoEmoteCooldown.cpp
+    src/modules/player/NoFire.cpp
+    src/modules/misc/NoHurt.cpp
     src/profile/PatchManager.cpp
 )
 
@@ -40,6 +54,20 @@ add_library(eclient_host SHARED
     src/memory/NativeMemory.cpp
     src/modules/ModuleManager.cpp
     src/modules/GameplayModules.cpp
+    src/modules/combat/AutoClickMine.cpp
+    src/modules/movement/AlwaysSprint.cpp
+    src/modules/movement/Step.cpp
+    src/modules/movement/NoSlowDown.cpp
+    src/modules/movement/Noclip.cpp
+    src/modules/movement/AntiKnockback.cpp
+    src/modules/movement/Fly.cpp
+    src/modules/visual/FullBright.cpp
+    src/modules/visual/NoHurtCam.cpp
+    src/modules/visual/NoBlur.cpp
+    src/modules/visual/NoCaveVignette.cpp
+    src/modules/player/NoEmoteCooldown.cpp
+    src/modules/player/NoFire.cpp
+    src/modules/misc/NoHurt.cpp
     src/profile/PatchManager.cpp
     src/input/NativeInputHook.cpp
     ../vendor/imgui/imgui.cpp

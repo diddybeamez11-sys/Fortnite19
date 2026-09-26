@@ -6,6 +6,7 @@ bool initialize();
 void shutdown();
 void toggleMenu();
 bool menuOpen();
+void submitKeyEvent(int keyCode, int keyAction);
 
 // The true on-screen pixel size, captured from the window Minecraft actually
 // creates its EGL surface on. This can differ from the surface's render-buffer
