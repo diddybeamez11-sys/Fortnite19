@@ -14,11 +14,14 @@ namespace eclient_runtime::input {
 namespace {
 constexpr const char* TAG = "EClientInput";
 using NativeKeyHandler = bool (*)(void*, void*, int, int);
+using NativeTouchHandler = void (*)(void*, void*, int, int, float, float);
 using GetEventFn = int32_t (*)(AInputQueue*, AInputEvent**);
 
 std::atomic_bool g_keyInstalled{false};
 std::atomic_bool g_touchInstalled{false};
+std::atomic_bool g_jniTouchInstalled{false};
 NativeKeyHandler g_original = nullptr;
+NativeTouchHandler g_originalTouch = nullptr;
 GetEventFn g_originalGetEvent = nullptr;
 
 bool hookedNativeKeyHandler(void* a1, void* a2, int keyCode, int keyAction) {
@@ -27,6 +30,34 @@ bool hookedNativeKeyHandler(void* a1, void* a2, int keyCode, int keyAction) {
         eclient_runtime::host::InGameGui::toggleMenu();
     }
     return g_original ? g_original(a1, a2, keyCode, keyAction) : false;
+}
+
+bool routeTouchAction(int action, float x, float y) {
+    const int masked = action & AMOTION_EVENT_ACTION_MASK;
+    switch (masked) {
+        case AMOTION_EVENT_ACTION_DOWN:
+        case AMOTION_EVENT_ACTION_POINTER_DOWN:
+            eclient_runtime::host::InGameGui::submitTouch(x, y, 0);
+            return true;
+        case AMOTION_EVENT_ACTION_MOVE:
+            eclient_runtime::host::InGameGui::submitTouch(x, y, 1);
+            return true;
+        case AMOTION_EVENT_ACTION_UP:
+        case AMOTION_EVENT_ACTION_POINTER_UP:
+        case AMOTION_EVENT_ACTION_CANCEL:
+            eclient_runtime::host::InGameGui::submitTouch(x, y, 2);
+            return true;
+        default:
+            return false;
+    }
+}
+
+void hookedNativeTouchHandler(void* env, void* activity, int action, int pointerId,
+                              float x, float y) {
+    if (!eclient_runtime::host::InGameGui::menuOpen() ||
+        !routeTouchAction(action, x, y)) {
+        if (g_originalTouch) g_originalTouch(env, activity, action, pointerId, x, y);
+    }
 }
 
 // While the menu is open, motion events are routed to ImGui and consumed so the
@@ -55,22 +86,7 @@ int32_t hookedGetEvent(AInputQueue* queue, AInputEvent** outEvent) {
     const float x = AMotionEvent_getX(ev, idx);
     const float y = AMotionEvent_getY(ev, idx);
 
-    switch (masked) {
-        case AMOTION_EVENT_ACTION_DOWN:
-        case AMOTION_EVENT_ACTION_POINTER_DOWN:
-            eclient_runtime::host::InGameGui::submitTouch(x, y, 0);
-            break;
-        case AMOTION_EVENT_ACTION_MOVE:
-            eclient_runtime::host::InGameGui::submitTouch(x, y, 1);
-            break;
-        case AMOTION_EVENT_ACTION_UP:
-        case AMOTION_EVENT_ACTION_POINTER_UP:
-        case AMOTION_EVENT_ACTION_CANCEL:
-            eclient_runtime::host::InGameGui::submitTouch(x, y, 2);
-            break;
-        default:
-            break;
-    }
+    routeTouchAction(action, x, y);
 
     // Consume so Minecraft does not also process the gesture.
     AInputQueue_finishEvent(queue, ev, 1);
@@ -131,7 +147,11 @@ bool installTouchHook() {
     if (g_touchInstalled.load()) return true;
     void* symbol = dlsym(RTLD_DEFAULT, "AInputQueue_getEvent");
     if (!symbol) symbol = reinterpret_cast<void*>(&AInputQueue_getEvent);
-    if (!symbol) return false;
+    if (!symbol) {
+        __android_log_print(ANDROID_LOG_WARN, TAG,
+                            "nativeTouchEvent export not found; relying on AInputQueue_getEvent");
+        return false;
+    }
     if (DobbyHook(symbol, reinterpret_cast<void*>(hookedGetEvent),
                   reinterpret_cast<void**>(&g_originalGetEvent)) != RS_SUCCESS ||
         !g_originalGetEvent) {
@@ -143,11 +163,44 @@ bool installTouchHook() {
     __android_log_print(ANDROID_LOG_INFO, TAG, "Touch routing for the GUI ready");
     return true;
 }
+
+bool installJniTouchHook() {
+    if (g_jniTouchInstalled.load()) return true;
+
+    static const char* candidates[] = {
+        "Java_com_mojang_minecraftpe_MainActivity_nativeTouchEvent",
+        "Java_com_mojang_minecraftpe_MainActivity_nativeTouchEvent__",
+        "Java_com_mojang_minecraftpe_MainActivity_nativeTouchEvent__IIFF"
+    };
+
+    void* symbol = nullptr;
+    for (const char* name : candidates) {
+        symbol = findInMinecraft(name);
+        if (symbol) {
+            __android_log_print(ANDROID_LOG_INFO, TAG, "Found touch export: %s", name);
+            break;
+        }
+    }
+    if (!symbol) return false;
+
+    if (DobbyHook(symbol, reinterpret_cast<void*>(hookedNativeTouchHandler),
+                  reinterpret_cast<void**>(&g_originalTouch)) != RS_SUCCESS ||
+        !g_originalTouch) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "nativeTouchEvent hook failed");
+        g_originalTouch = nullptr;
+        return false;
+    }
+    g_jniTouchInstalled.store(true);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "JNI touch routing for the GUI ready");
+    return true;
+}
 } // namespace
 
 bool initialize() {
     const bool key = installKeyHook();
-    const bool touch = installTouchHook();
+    const bool queueTouch = installTouchHook();
+    const bool jniTouch = installJniTouchHook();
+    const bool touch = queueTouch || jniTouch;
     if (!key) {
         // No hotkey: open the menu so it remains reachable.
         eclient_runtime::host::InGameGui::toggleMenu();
@@ -162,6 +215,7 @@ bool initialize() {
 void shutdown() {
     g_keyInstalled.store(false);
     g_touchInstalled.store(false);
+    g_jniTouchInstalled.store(false);
 }
 
 } // namespace eclient_runtime::input
