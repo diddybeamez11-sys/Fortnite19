@@ -41,6 +41,7 @@ std::vector<TouchSample> g_touchQueue;
 float g_lastTouchX = -1.0f;
 float g_lastTouchY = -1.0f;
 bool g_lastTouchDown = false;
+char g_search[64] = {};
 
 using SwapBuffersFn = EGLBoolean (*)(EGLDisplay, EGLSurface);
 SwapBuffersFn g_originalSwap = nullptr;
@@ -51,12 +52,31 @@ void drawModuleList() {
     auto& mgr = eclient_runtime::modules::ModuleManager::instance();
     const auto& modules = mgr.all();
 
-    // Group by category while preserving registration order.
-    static const char* kOrder[] = {"Combat", "Movement", "Visual", "Player", "Misc"};
+    static constexpr const char* kOrder[] = {"Combat", "Movement", "Visual", "Player", "Misc"};
     std::unordered_map<std::string, std::vector<const eclient_runtime::modules::ModuleState*>> byCat;
+
+    const std::string filter = g_search;
+    bool anyVisible = false;
     for (const auto& m : modules) {
         const std::string cat = m.category.empty() ? "Misc" : m.category;
+        if (!filter.empty()) {
+            const std::string needle = filter;
+            const std::string hay = m.name + " " + m.description + " " + m.category;
+            const auto pos = hay.find(needle);
+            if (pos == std::string::npos) {
+                continue;
+            }
+        }
         byCat[cat].push_back(&m);
+        anyVisible = true;
+    }
+
+    ImGui::InputTextWithHint("##module_search", "Search modules...", g_search, sizeof(g_search));
+    ImGui::Spacing();
+
+    if (!anyVisible) {
+        ImGui::TextDisabled("No modules match the current filter.");
+        return;
     }
 
     if (ImGui::BeginTabBar("##cats", ImGuiTabBarFlags_FittingPolicyScroll)) {
@@ -69,13 +89,10 @@ void drawModuleList() {
                               ImVec2(0, 320), true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             for (const auto* module : it->second) {
                 bool enabled = module->enabled;
-                // Larger hit target for touch.
                 ImGui::PushID(module->name.c_str());
-                if (ImGui::Checkbox(module->name.c_str(), &enabled)) {
-                    if (!mgr.setEnabled(module->name, enabled)) {
-                        // Revert visual if patch layer rejected the change.
-                        enabled = module->enabled;
-                    }
+                const bool toggled = ImGui::Checkbox(module->name.c_str(), &enabled);
+                if (toggled && !mgr.setEnabled(module->name, enabled)) {
+                    enabled = module->enabled;
                 }
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("%s\n[%s]%s",
@@ -110,15 +127,23 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
             ImGuiIO& io0 = ImGui::GetIO();
             io0.IniFilename = nullptr;
             io0.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-            // Touch-friendly: windows can be moved from anywhere, larger frame padding.
+            io0.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
+            io0.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;
             ImGui::StyleColorsDark();
             ImGuiStyle& style = ImGui::GetStyle();
-            style.TouchExtraPadding = ImVec2(8.0f, 8.0f);
+            style.WindowPadding = ImVec2(14.0f, 12.0f);
             style.FramePadding = ImVec2(10.0f, 8.0f);
             style.ItemSpacing = ImVec2(10.0f, 8.0f);
+            style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
+            style.TouchExtraPadding = ImVec2(8.0f, 8.0f);
             style.ScrollbarSize = 28.0f;
-            style.WindowRounding = 8.0f;
-            style.FrameRounding = 6.0f;
+            style.WindowRounding = 10.0f;
+            style.FrameRounding = 8.0f;
+            style.GrabRounding = 8.0f;
+            style.TabRounding = 8.0f;
+            style.ChildRounding = 10.0f;
+            style.WindowBorderSize = 1.0f;
+            style.FrameBorderSize = 0.0f;
             ImGui_ImplOpenGL3_Init("#version 300 es");
             __android_log_print(ANDROID_LOG_INFO, TAG, "ImGui renderer initialized");
         }
@@ -175,18 +200,16 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
 
             bool keepOpen = open;
             ImGui::Begin("E-Client 1.21.111", &keepOpen,
-                         ImGuiWindowFlags_NoCollapse);
+                         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
 
             const auto bridge = eclient_runtime::GameBridge::instance().snapshot();
             ImGui::Text("Minecraft: %s", bridge.libraryLoaded ? "YES" : "NO");
             ImGui::Text("Build: %s", bridge.buildId.empty() ? "unknown" : bridge.buildId.c_str());
-            ImGui::TextDisabled("Volume Up = toggle menu | drag scrollbar to scroll");
+            ImGui::TextColored(ImVec4(0.55f, 0.90f, 0.75f, 1.0f), "%s", bridge.status.c_str());
             ImGui::Separator();
-
             drawModuleList();
-
             ImGui::Separator();
-            ImGui::TextDisabled("Patches fail closed if the 1.21.111 profile does not match.");
+            ImGui::TextDisabled("Volume Up = toggle | drag = scroll | tap = activate");
             ImGui::End();
             if (!keepOpen && g_menuOpen.load()) toggleMenu();
         }
