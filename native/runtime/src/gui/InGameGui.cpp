@@ -363,6 +363,15 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
             drawModuleList();
             ImGui::End();
             if (!keepOpen && g_menuOpen.load()) toggleMenu();
+        } else {
+            // When menu is closed, consume any pending input and clear it
+            std::lock_guard lock(g_touchMutex);
+            g_touchQueue.clear();
+            g_lastTouchX = -1.0f;
+            g_lastTouchY = -1.0f;
+            g_lastTouchDown = false;
+            io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+            io.AddMouseButtonEvent(0, false);
         }
 
         ImGui::Render();
@@ -428,7 +437,7 @@ void setPhysicalWindowSize(int width, int height) {
 }
 
 void submitTouch(float x, float y, int action) {
-    if (!g_menuOpen.load() || action < 0 || action > 2) return;
+    if (action < 0 || action > 2) return;
     std::lock_guard lock(g_touchMutex);
     // Cap queue so a stuck input thread cannot grow without bound.
     if (g_touchQueue.size() > 64) g_touchQueue.erase(g_touchQueue.begin(), g_touchQueue.begin() + 32);
