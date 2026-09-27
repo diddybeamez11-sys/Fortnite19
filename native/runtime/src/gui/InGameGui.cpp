@@ -31,13 +31,10 @@ std::atomic_bool g_ready{false};
 std::atomic_bool g_imguiReady{false};
 std::atomic_bool g_menuOpen{false};
 
-// Queued touch events: input thread pushes, render thread drains in order.
-// A single atomic pair was overwriting DOWN with UP between frames, so ImGui
-// never saw a complete click.
 struct TouchSample {
     float x{0};
     float y{0};
-    int action{0}; // 0=down, 1=move, 2=up/cancel
+    int action{0};
 };
 std::mutex g_touchMutex;
 std::vector<TouchSample> g_touchQueue;
@@ -283,7 +280,9 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
         io.DisplaySize = ImVec2(static_cast<float>(width), static_cast<float>(height));
         io.FontGlobalScale = uiScale;
 
-        // Drain the touch queue in arrival order so DOWN/MOVE/UP sequences reach ImGui.
+        const bool open = g_menuOpen.load();
+
+        // Process touch input - always drain queue
         {
             std::lock_guard lock(g_touchMutex);
             if (!g_touchQueue.empty()) {
@@ -300,20 +299,24 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
                         g_lastTouchDown = false;
                         io.AddMouseButtonEvent(0, false);
                     }
-                    // action == 1 (move): position only, button state unchanged
                 }
                 g_touchQueue.clear();
-            } else if (g_lastTouchDown) {
-                // Finger still down with no new events: keep position + button.
-                io.AddMousePosEvent(g_lastTouchX, g_lastTouchY);
-                io.AddMouseButtonEvent(0, true);
-            } else if (g_lastTouchX >= 0.0f) {
-                // After release keep last hover for a frame so ImGui can finish click.
-                io.AddMousePosEvent(g_lastTouchX, g_lastTouchY);
-                io.AddMouseButtonEvent(0, false);
+            } else if (open) {
+                // Menu open: keep sending position to ImGui
+                if (g_lastTouchDown) {
+                    io.AddMousePosEvent(g_lastTouchX, g_lastTouchY);
+                    io.AddMouseButtonEvent(0, true);
+                } else if (g_lastTouchX >= 0.0f) {
+                    io.AddMousePosEvent(g_lastTouchX, g_lastTouchY);
+                    io.AddMouseButtonEvent(0, false);
+                }
             } else {
+                // Menu closed: tell ImGui no input
                 io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
                 io.AddMouseButtonEvent(0, false);
+                g_lastTouchX = -1.0f;
+                g_lastTouchY = -1.0f;
+                g_lastTouchDown = false;
             }
         }
 
@@ -321,7 +324,6 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
         ImGui::NewFrame();
         processKeyEvents();
 
-        const bool open = g_menuOpen.load();
         if (open) {
             const float winW = std::min(760.0f * uiScale, static_cast<float>(width) * 0.94f);
             const float winH = std::min(860.0f * uiScale, static_cast<float>(height) * 0.90f);
@@ -363,15 +365,6 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
             drawModuleList();
             ImGui::End();
             if (!keepOpen && g_menuOpen.load()) toggleMenu();
-        } else {
-            // When menu is closed, consume any pending input and clear it
-            std::lock_guard lock(g_touchMutex);
-            g_touchQueue.clear();
-            g_lastTouchX = -1.0f;
-            g_lastTouchY = -1.0f;
-            g_lastTouchDown = false;
-            io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
-            io.AddMouseButtonEvent(0, false);
         }
 
         ImGui::Render();
@@ -419,9 +412,6 @@ void toggleMenu() {
     while (!g_menuOpen.compare_exchange_weak(wasOpen, !wasOpen)) {
     }
 
-    // Do not carry a partially completed touch into the next menu session.
-    // In particular, closing the menu during a drag used to leave ImGui's
-    // primary mouse button pressed when it was opened again.
     if (wasOpen) {
         std::lock_guard lock(g_touchMutex);
         g_touchQueue.clear();
@@ -439,7 +429,6 @@ void setPhysicalWindowSize(int width, int height) {
 void submitTouch(float x, float y, int action) {
     if (action < 0 || action > 2) return;
     std::lock_guard lock(g_touchMutex);
-    // Cap queue so a stuck input thread cannot grow without bound.
     if (g_touchQueue.size() > 64) g_touchQueue.erase(g_touchQueue.begin(), g_touchQueue.begin() + 32);
     g_touchQueue.push_back(TouchSample{x, y, action});
 }
