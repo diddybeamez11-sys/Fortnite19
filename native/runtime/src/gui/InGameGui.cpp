@@ -282,7 +282,7 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
 
         const bool open = g_menuOpen.load();
 
-        // Process ALL touch input every frame
+        // Process touch input - send to ImGui properly
         {
             std::lock_guard lock(g_touchMutex);
             if (!g_touchQueue.empty()) {
@@ -291,28 +291,31 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
                     const float sy = sample.y * scaleY;
                     g_lastTouchX = sx;
                     g_lastTouchY = sy;
+                    
+                    // Always send position first
                     io.AddMousePosEvent(sx, sy);
+                    
+                    // Then send button state
                     if (sample.action == 0) {
+                        // Touch down
                         g_lastTouchDown = true;
                         io.AddMouseButtonEvent(0, true);
-                        __android_log_print(ANDROID_LOG_DEBUG, TAG, "Touch DOWN at %.0f,%.0f", sx, sy);
+                        __android_log_print(ANDROID_LOG_DEBUG, TAG, "TOUCH DOWN at %.0f, %.0f", sx, sy);
                     } else if (sample.action == 2) {
+                        // Touch up
                         g_lastTouchDown = false;
                         io.AddMouseButtonEvent(0, false);
-                        __android_log_print(ANDROID_LOG_DEBUG, TAG, "Touch UP at %.0f,%.0f", sx, sy);
-                    } else if (sample.action == 1) {
-                        io.AddMousePosEvent(sx, sy);
-                        __android_log_print(ANDROID_LOG_DEBUG, TAG, "Touch MOVE at %.0f,%.0f", sx, sy);
+                        __android_log_print(ANDROID_LOG_DEBUG, TAG, "TOUCH UP at %.0f, %.0f", sx, sy);
                     }
+                    // action == 1 is move, just position update
                 }
                 g_touchQueue.clear();
-            } else {
-                // No new touch events - keep reporting last state
+            } else if (open) {
+                // Keep last position and state for ImGui
+                io.AddMousePosEvent(g_lastTouchX, g_lastTouchY);
                 if (g_lastTouchDown) {
-                    io.AddMousePosEvent(g_lastTouchX, g_lastTouchY);
                     io.AddMouseButtonEvent(0, true);
-                } else if (g_lastTouchX >= 0.0f) {
-                    io.AddMousePosEvent(g_lastTouchX, g_lastTouchY);
+                } else {
                     io.AddMouseButtonEvent(0, false);
                 }
             }
@@ -332,11 +335,10 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
 
             bool keepOpen = open;
             const auto bridge = eclient_runtime::GameBridge::instance().snapshot();
-            ImGui::SetNextWindowFocus();
             ImGui::Begin("##main", &keepOpen,
                          ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
                              ImGuiWindowFlags_NoSavedSettings);
-            
+
             const float closeWidth = ImGui::GetFrameHeight();
             const float dragWidth = std::max(0.0f, ImGui::GetContentRegionAvail().x - closeWidth -
                                                       ImGui::GetStyle().ItemSpacing.x);
@@ -348,7 +350,7 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
                 newPos.y += io.MouseDelta.y;
                 ImGui::SetWindowPos(newPos);
             }
-            
+
             ImDrawList* drawList = ImGui::GetWindowDrawList();
             const ImVec2 titleSize = ImGui::CalcTextSize("E / CLIENT");
             drawList->AddText(headerPos, ImGui::GetColorU32(ImGuiCol_CheckMark), "E / CLIENT");
@@ -356,7 +358,7 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
                               ImGui::GetColorU32(ImGuiCol_TextDisabled), "1.21.111");
             ImGui::SameLine();
             if (ImGui::Button("X")) keepOpen = false;
-            
+
             const bool runtimeReady = bridge.libraryLoaded && bridge.fingerprintMatched;
             ImGui::TextColored(runtimeReady ? ImVec4(0.35f, 0.91f, 0.68f, 1.0f)
                                             : ImVec4(0.96f, 0.66f, 0.30f, 1.0f),
@@ -366,7 +368,7 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
             ImGui::Separator();
             drawModuleList();
             ImGui::End();
-            
+
             if (!keepOpen && g_menuOpen.load()) toggleMenu();
         }
 
