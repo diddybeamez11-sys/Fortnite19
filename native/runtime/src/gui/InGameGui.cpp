@@ -282,7 +282,7 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
 
         const bool open = g_menuOpen.load();
 
-        // Process touch input - send to ImGui properly
+        // Process touch input
         {
             std::lock_guard lock(g_touchMutex);
             if (!g_touchQueue.empty()) {
@@ -291,33 +291,21 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
                     const float sy = sample.y * scaleY;
                     g_lastTouchX = sx;
                     g_lastTouchY = sy;
-                    
-                    // Always send position first
                     io.AddMousePosEvent(sx, sy);
                     
-                    // Then send button state
                     if (sample.action == 0) {
-                        // Touch down
                         g_lastTouchDown = true;
                         io.AddMouseButtonEvent(0, true);
-                        __android_log_print(ANDROID_LOG_DEBUG, TAG, "TOUCH DOWN at %.0f, %.0f", sx, sy);
                     } else if (sample.action == 2) {
-                        // Touch up
                         g_lastTouchDown = false;
                         io.AddMouseButtonEvent(0, false);
-                        __android_log_print(ANDROID_LOG_DEBUG, TAG, "TOUCH UP at %.0f, %.0f", sx, sy);
                     }
-                    // action == 1 is move, just position update
                 }
                 g_touchQueue.clear();
             } else if (open) {
-                // Keep last position and state for ImGui
+                // Keep position updated for ImGui when menu is open
                 io.AddMousePosEvent(g_lastTouchX, g_lastTouchY);
-                if (g_lastTouchDown) {
-                    io.AddMouseButtonEvent(0, true);
-                } else {
-                    io.AddMouseButtonEvent(0, false);
-                }
+                io.AddMouseButtonEvent(0, g_lastTouchDown);
             }
         }
 
