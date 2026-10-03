@@ -1,10 +1,12 @@
 #include "input/NativeInputHook.h"
 
 #include <android/input.h>
+#include <jni.h>
 #include <android/keycodes.h>
 #include <android/log.h>
 #include <dlfcn.h>
 #include <atomic>
+#include <string_view>
 
 #include "dobby.h"
 #include "gui/InGameGui.h"
@@ -14,15 +16,18 @@ namespace eclient_runtime::input {
 namespace {
 constexpr const char* TAG = "EClientInput";
 using NativeKeyHandler = bool (*)(void*, void*, int, int);
-using NativeTouchHandler = void (*)(void*, void*, int, int, float, float);
+using NativeTouchHandler = jint (*)(JNIEnv*, jobject, jint, jint, jfloat, jfloat);
 using GetEventFn = int32_t (*)(AInputQueue*, AInputEvent**);
+using RegisterNativesFn = jint (*)(JNIEnv*, jclass, const JNINativeMethod*, jint);
 
 std::atomic_bool g_keyInstalled{false};
 std::atomic_bool g_touchInstalled{false};
 std::atomic_bool g_jniTouchInstalled{false};
+std::atomic_bool g_registerNativesInstalled{false};
 NativeKeyHandler g_original = nullptr;
 NativeTouchHandler g_originalTouch = nullptr;
 GetEventFn g_originalGetEvent = nullptr;
+RegisterNativesFn g_originalRegisterNatives = nullptr;
 
 bool hookedNativeKeyHandler(void* a1, void* a2, int keyCode, int keyAction) {
     // Volume-up toggles the in-game menu (ACTION_DOWN only).
@@ -52,12 +57,69 @@ bool routeTouchAction(int action, float x, float y) {
     }
 }
 
-void hookedNativeTouchHandler(void* env, void* activity, int action, int pointerId,
-                              float x, float y) {
+jint hookedNativeTouchHandler(JNIEnv* env, jobject activity, jint action, jint pointerId,
+                              jfloat x, jfloat y) {
     if (!eclient_runtime::host::InGameGui::menuOpen() ||
         !routeTouchAction(action, x, y)) {
-        if (g_originalTouch) g_originalTouch(env, activity, action, pointerId, x, y);
+        return g_originalTouch
+                   ? g_originalTouch(env, activity, action, pointerId, x, y)
+                   : JNI_FALSE;
     }
+
+    // Some Minecraft builds declare this callback as void while others return
+    // a boolean/int handled flag. The return value is ignored for void JNI
+    // methods, and true is the correct result for the handled variants.
+    return JNI_TRUE;
+}
+
+bool isTouchRegistration(const char* name, const char* signature) {
+    if (!name || !signature) return false;
+
+    const std::string_view method{name};
+    const bool namedTouchMethod =
+        method.find("Touch") != std::string_view::npos ||
+        method.find("touch") != std::string_view::npos ||
+        method.find("Motion") != std::string_view::npos ||
+        method.find("motion") != std::string_view::npos ||
+        method.find("Mouse") != std::string_view::npos ||
+        method.find("mouse") != std::string_view::npos;
+
+    // Minecraft's Android input callback is normally (int, int, float, float).
+    // Only hook this known ABI; matching by name alone would risk patching an
+    // unrelated native method with incompatible arguments.
+    const std::string_view sig{signature};
+    const bool knownTouchAbi =
+        sig == "(IIFF)V" || sig == "(IIFF)Z" || sig == "(IIFF)I";
+    return namedTouchMethod && knownTouchAbi;
+}
+
+jint hookedRegisterNatives(JNIEnv* env, jclass clazz,
+                           const JNINativeMethod* methods, jint count) {
+    if (methods && count > 0 && !g_originalTouch) {
+        for (jint i = 0; i < count; ++i) {
+            const auto& method = methods[i];
+            if (!isTouchRegistration(method.name, method.signature) || !method.fn) continue;
+
+            if (DobbyHook(method.fn, reinterpret_cast<void*>(hookedNativeTouchHandler),
+                          reinterpret_cast<void**>(&g_originalTouch)) == RS_SUCCESS &&
+                g_originalTouch) {
+                g_jniTouchInstalled.store(true);
+                __android_log_print(ANDROID_LOG_INFO, TAG,
+                                    "Hooked dynamically registered input method: %s %s",
+                                    method.name, method.signature);
+            } else {
+                g_originalTouch = nullptr;
+                __android_log_print(ANDROID_LOG_WARN, TAG,
+                                    "Could not hook dynamically registered input method: %s %s",
+                                    method.name, method.signature);
+            }
+            break;
+        }
+    }
+
+    return g_originalRegisterNatives
+               ? g_originalRegisterNatives(env, clazz, methods, count)
+               : JNI_ERR;
 }
 
 // While the menu is open, motion events are routed to ImGui and consumed so the
@@ -86,12 +148,45 @@ int32_t hookedGetEvent(AInputQueue* queue, AInputEvent** outEvent) {
     const float x = AMotionEvent_getX(ev, idx);
     const float y = AMotionEvent_getY(ev, idx);
 
-    routeTouchAction(action, x, y);
+    // Leave hover/button events that are outside the touch adapter to
+    // Minecraft. Only finish an event after it has been accepted by the GUI
+    // route; otherwise a physical mouse or an unknown motion action would be
+    // silently discarded.
+    if (!routeTouchAction(action, x, y)) return result;
 
     // Consume so Minecraft does not also process the gesture.
     AInputQueue_finishEvent(queue, ev, 1);
     *outEvent = nullptr;
     return -1;
+}
+
+bool installJniRegistrationHookImpl(JavaVM* vm) {
+    if (g_registerNativesInstalled.load()) return true;
+    if (!vm) return false;
+
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || !env || !env->functions) {
+        __android_log_print(ANDROID_LOG_WARN, TAG,
+                            "Unable to access JNI table for RegisterNatives hook");
+        return false;
+    }
+
+    auto registerNatives = env->functions->RegisterNatives;
+    if (!registerNatives) return false;
+
+    if (DobbyHook(reinterpret_cast<void*>(registerNatives),
+                  reinterpret_cast<void*>(hookedRegisterNatives),
+                  reinterpret_cast<void**>(&g_originalRegisterNatives)) != RS_SUCCESS ||
+        !g_originalRegisterNatives) {
+        g_originalRegisterNatives = nullptr;
+        __android_log_print(ANDROID_LOG_WARN, TAG, "RegisterNatives hook failed");
+        return false;
+    }
+
+    g_registerNativesInstalled.store(true);
+    __android_log_print(ANDROID_LOG_INFO, TAG,
+                        "JNI RegisterNatives hook ready for dynamic touch callbacks");
+    return true;
 }
 
 void* findInMinecraft(const char* symbol) {
@@ -196,6 +291,10 @@ bool installJniTouchHook() {
 }
 } // namespace
 
+bool installJniRegistrationHook(JavaVM* vm) {
+    return installJniRegistrationHookImpl(vm);
+}
+
 bool initialize() {
     const bool key = installKeyHook();
     const bool queueTouch = installTouchHook();
@@ -216,6 +315,7 @@ void shutdown() {
     g_keyInstalled.store(false);
     g_touchInstalled.store(false);
     g_jniTouchInstalled.store(false);
+    g_registerNativesInstalled.store(false);
 }
 
 } // namespace eclient_runtime::input
