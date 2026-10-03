@@ -98,9 +98,9 @@ jint hookedRegisterNatives(JNIEnv* env, jclass clazz,
     if (methods && count > 0 && !g_originalTouch) {
         for (jint i = 0; i < count; ++i) {
             const auto& method = methods[i];
-            if (!isTouchRegistration(method.name, method.signature) || !method.fn) continue;
+            if (!isTouchRegistration(method.name, method.signature) || !method.fnPtr) continue;
 
-            if (DobbyHook(method.fn, reinterpret_cast<void*>(hookedNativeTouchHandler),
+            if (DobbyHook(method.fnPtr, reinterpret_cast<void*>(hookedNativeTouchHandler),
                           reinterpret_cast<void**>(&g_originalTouch)) == RS_SUCCESS &&
                 g_originalTouch) {
                 g_jniTouchInstalled.store(true);
