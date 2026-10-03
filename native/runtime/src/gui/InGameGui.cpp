@@ -6,6 +6,7 @@
 #include <android/log.h>
 #include <dlfcn.h>
 #include <cfloat>
+#include <chrono>
 #include <algorithm>
 #include <atomic>
 #include <mutex>
@@ -41,6 +42,7 @@ std::vector<TouchSample> g_touchQueue;
 float g_lastTouchX = -1.0f;
 float g_lastTouchY = -1.0f;
 bool g_lastTouchDown = false;
+std::chrono::steady_clock::time_point g_lastFrameTime{};
 char g_search[64] = {};
 
 using SwapBuffersFn = EGLBoolean (*)(EGLDisplay, EGLSurface);
@@ -128,6 +130,10 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
             io0.IniFilename = nullptr;
             io0.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
             io0.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
+            // Keep the down/up pair in ImGui's queue long enough for a tap to
+            // become a click even when both Android callbacks arrive between
+            // two rendered frames.
+            io0.ConfigInputTrickleEventQueue = true;
             io0.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;
             ImGui::StyleColorsDark();
             ImGuiStyle& style = ImGui::GetStyle();
@@ -150,7 +156,15 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
 
         ImGuiIO& io = ImGui::GetIO();
         io.DisplaySize = ImVec2(static_cast<float>(width), static_cast<float>(height));
+        io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
         io.FontGlobalScale = std::max(1.5f, static_cast<float>(std::min(width, height)) / 360.0f);
+
+        const auto now = std::chrono::steady_clock::now();
+        if (g_lastFrameTime.time_since_epoch().count() != 0) {
+            const auto elapsed = std::chrono::duration<float>(now - g_lastFrameTime).count();
+            io.DeltaTime = std::clamp(elapsed, 1.0f / 240.0f, 0.25f);
+        }
+        g_lastFrameTime = now;
 
         // Drain the touch queue in arrival order so DOWN/MOVE/UP sequences reach ImGui.
         {
@@ -161,6 +175,7 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
                     const float sy = sample.y * scaleY;
                     g_lastTouchX = sx;
                     g_lastTouchY = sy;
+                    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
                     io.AddMousePosEvent(sx, sy);
                     if (sample.action == 0) {
                         g_lastTouchDown = true;
@@ -174,13 +189,16 @@ EGLBoolean hookedSwap(EGLDisplay display, EGLSurface surface) {
                 g_touchQueue.clear();
             } else if (g_lastTouchDown) {
                 // Finger still down with no new events: keep position + button.
+                io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
                 io.AddMousePosEvent(g_lastTouchX, g_lastTouchY);
                 io.AddMouseButtonEvent(0, true);
             } else if (g_lastTouchX >= 0.0f) {
                 // After release keep last hover for a frame so ImGui can finish click.
+                io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
                 io.AddMousePosEvent(g_lastTouchX, g_lastTouchY);
                 io.AddMouseButtonEvent(0, false);
             } else {
+                io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
                 io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
                 io.AddMouseButtonEvent(0, false);
             }
@@ -310,6 +328,7 @@ void shutdown() {
     g_lastTouchX = -1.0f;
     g_lastTouchY = -1.0f;
     g_lastTouchDown = false;
+    g_lastFrameTime = {};
     if (g_imguiReady.exchange(false)) {
         ImGui_ImplOpenGL3_Shutdown();
         ImGui::DestroyContext();
